@@ -196,15 +196,12 @@ describe("authenticated FriendHost voice membership", () => {
     let releaseSigning!: () => void;
     const signingStarted = new Promise<void>((resolve) => { announceSigning = resolve; });
     const signingGate = new Promise<void>((resolve) => { releaseSigning = resolve; });
-    const originalSign = crypto.subtle.sign.bind(crypto.subtle);
-    const signSpy = vi.spyOn(crypto.subtle, "sign").mockImplementation(async (
-      algorithm,
-      key,
-      data,
-    ) => {
+    const signSpy = vi.spyOn(crypto.subtle, "sign").mockImplementation(async () => {
       announceSigning();
       await signingGate;
-      return originalSign(algorithm, key, data);
+      // A deterministic, correctly-sized Ed25519 signature is sufficient here:
+      // this test asserts broker delivery/authorization, not cryptographic validity.
+      return new Uint8Array(64).buffer;
     });
 
     try {
