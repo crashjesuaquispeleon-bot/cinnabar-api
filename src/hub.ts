@@ -691,6 +691,7 @@ export class Hub extends DurableObject<Env> {
       if (!currentMembership || currentMembership.room_id !== room.room_id || !currentRoom ||
           currentRoom.session_id !== room.session_id || currentRoom.owner_xuid !== room.owner_xuid ||
           commitNow - currentRoom.updated_at > VOICE_HOST_LEASE_MS ||
+          admission.expiresAt * 1000 <= commitNow ||
           !this.hasLiveAccount(state.xuid, commitNow) ||
           !this.hasLiveAccount(currentRoom.owner_xuid, commitNow)) return false;
       this.ctx.storage.sql.exec(
