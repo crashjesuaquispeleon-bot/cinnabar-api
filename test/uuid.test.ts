@@ -10,7 +10,7 @@ const STEVE_UUID = "e367d8c0-b340-3da7-8b77-90d9a5934061";
 const NOBODY_UUID = "a8a84e9b-539a-3eea-b942-0f60b1980667";
 const open: Client[] = [];
 
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 beforeEach(async () => {
   await runInDurableObject(hub(), (_, state) => state.storage.deleteAll());
   await evictDurableObject(hub());

@@ -26,7 +26,7 @@ const issuerJwk = { ...(await exportJWK(issuerKeyPair.publicKey)), kid: KID, alg
 export const issuer: FakeIssuer = { signingKey: issuerKeyPair.privateKey, fetches: [] };
 
 /** Serves the fake issuer's discovery documents to the Worker's outbound fetch. */
-export function installFakeIssuer(): void {
+export function installFakeIssuer(intercept?: (url: string) => Response | undefined): void {
   const realFetch = globalThis.fetch;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
@@ -42,6 +42,8 @@ export function installFakeIssuer(): void {
       issuer.fetches.push(url);
       return Response.json({ keys: [issuerJwk] });
     }
+    const intercepted = intercept?.(url);
+    if (intercepted) return intercepted;
     return realFetch(input, init);
   });
 }

@@ -11,7 +11,7 @@ import { hub, installFakeIssuer, login, type Client } from "./helpers";
 const paid = { ...catalog.items[0]!, id: "fixture:paid", free: false };
 const release = { ...catalog, version: catalog.version + 1, items: [...catalog.items, paid] };
 const clients: Client[] = [];
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 afterEach(async () => {
   await Promise.all(clients.splice(0).map((client) => (client.close(), client.closed)));
   await env.COSMETIC_ASSETS.delete(CATALOG_KEY);

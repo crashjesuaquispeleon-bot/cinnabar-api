@@ -27,7 +27,7 @@ function directory(authorization = "Bearer test-presence-secret") {
   });
 }
 
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 afterEach(() => Promise.all(clients.splice(0).map((client) => (client.close(), client.closed))));
 
 describe("private online directory", () => {

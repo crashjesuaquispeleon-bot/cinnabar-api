@@ -3,7 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { hub, installFakeIssuer, login, postRelease, type Client } from "./helpers";
 
 const open: Client[] = [];
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 beforeEach(async () => {
   await runInDurableObject(hub(), (_, state) => state.storage.deleteAll());
   await evictDurableObject(hub());

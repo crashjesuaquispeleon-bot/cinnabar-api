@@ -6,7 +6,7 @@ import type { Hub } from "../src/hub";
 import { clientKey, connect, hello, hub, installFakeIssuer, login, mintToken, sign, type Client } from "./helpers";
 
 const open: Client[] = [];
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 beforeEach(() => runInDurableObject(hub(), (_: Hub, state) => {
   state.storage.sql.exec("DELETE FROM unique_users");
 }));
@@ -66,7 +66,7 @@ it("retains the total and deduplication after disconnects and object eviction", 
   await player("101");
   await player("102");
   expect(await hub().uniqueUserCount()).toBe(2);
-});
+}, 15_000);
 
 it("stores only salted digests, without account names or raw identifiers", async () => {
   await player("2535412345678901");

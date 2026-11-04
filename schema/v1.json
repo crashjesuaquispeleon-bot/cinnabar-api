@@ -157,6 +157,18 @@
         },
         {
           "$ref": "#/$defs/LoadoutState"
+        },
+        {
+          "$ref": "#/$defs/VoiceHostOpen"
+        },
+        {
+          "$ref": "#/$defs/VoiceHostMembers"
+        },
+        {
+          "$ref": "#/$defs/VoiceHostClose"
+        },
+        {
+          "$ref": "#/$defs/VoiceAdmissionRequest"
         }
       ]
     },
@@ -288,6 +300,21 @@
         },
         {
           "$ref": "#/$defs/CosmeticOwnership"
+        },
+        {
+          "$ref": "#/$defs/VoiceRoom"
+        },
+        {
+          "$ref": "#/$defs/VoiceMembersUpdated"
+        },
+        {
+          "$ref": "#/$defs/VoiceClosed"
+        },
+        {
+          "$ref": "#/$defs/VoiceAdmission"
+        },
+        {
+          "$ref": "#/$defs/VoiceError"
         }
       ]
     },
@@ -1332,6 +1359,194 @@
         }
       },
       "additionalProperties": true
+    },
+    "VoiceHostOpen": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_host_open"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        }
+      }
+    },
+    "VoiceHostMembers": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id",
+        "members"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_host_members"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "members": {
+          "type": "array",
+          "maxItems": 63,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/Xuid"
+          }
+        }
+      },
+      "description": "Replaces the host-reported guest roster for a FriendHost room. The authenticated owner is inserted by the broker; guest identifiers are resolved only against live authenticated Cinnabar accounts."
+    },
+    "VoiceHostClose": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_host_close"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        }
+      }
+    },
+    "VoiceAdmissionRequest": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_admission_request"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        }
+      },
+      "description": "Requests a short-lived token for the current authenticated account's server-stored voice membership. No XUID, room or session identifier is accepted."
+    },
+    "VoiceRoom": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id",
+        "room_id",
+        "session_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_room"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "room_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        }
+      }
+    },
+    "VoiceMembersUpdated": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id",
+        "count"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_members_updated"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      }
+    },
+    "VoiceClosed": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id",
+        "sfu_closed"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_closed"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "sfu_closed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "VoiceAdmission": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id",
+        "token",
+        "expires_at"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_admission"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "token": {
+          "type": "string",
+          "maxLength": 4096,
+          "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "VoiceError": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id",
+        "code"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_error"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "code": {
+          "enum": [
+            "unavailable",
+            "not_a_host",
+            "room_not_open",
+            "invalid_members",
+            "member_unavailable",
+            "already_in_room",
+            "not_in_room",
+            "host_lease_expired"
+          ]
+        }
+      }
     }
   }
 }

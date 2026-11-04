@@ -66,6 +66,23 @@ export interface Visibility {
   type: "visibility";
   visible: boolean;
 }
+export interface VoiceHostOpen {
+  type: "voice_host_open";
+  request_id: string;
+}
+export interface VoiceHostMembers {
+  type: "voice_host_members";
+  request_id: string;
+  members: string[];
+}
+export interface VoiceHostClose {
+  type: "voice_host_close";
+  request_id: string;
+}
+export interface VoiceAdmissionRequest {
+  type: "voice_admission_request";
+  request_id: string;
+}
 export interface Lookup {
   type: "lookup";
   id: number;
@@ -107,7 +124,12 @@ export type ServerMessage =
   | { type: "error"; code: "rate_limited"; id: number }
   | { type: "lookup_result"; id: number; cinnabar: string[]; cinnabar_uuids?: string[] }
   | ({ type: "release" } & ReleaseRecord)
-  | { type: "emote"; xuid: string; uuid: string; emote_id: string | null; elapsed_ms: number; valid_for_ms: number };
+  | { type: "emote"; xuid: string; uuid: string; emote_id: string | null; elapsed_ms: number; valid_for_ms: number }
+  | { type: "voice_room"; request_id: string; room_id: string; session_id: string }
+  | { type: "voice_members_updated"; request_id: string; count: number }
+  | { type: "voice_closed"; request_id: string; sfu_closed: boolean }
+  | { type: "voice_admission"; request_id: string; token: string; expires_at: number }
+  | { type: "voice_error"; request_id: string; code: "unavailable" | "not_a_host" | "room_not_open" | "invalid_members" | "member_unavailable" | "already_in_room" | "not_in_room" | "host_lease_expired" };
 
 interface ClientMessages {
   hello: Hello;
@@ -116,10 +138,19 @@ interface ClientMessages {
   lookup: Lookup;
   emote_state: EmoteState;
   loadout: LoadoutState;
+  voice_host_open: VoiceHostOpen;
+  voice_host_members: VoiceHostMembers;
+  voice_host_close: VoiceHostClose;
+  voice_admission_request: VoiceAdmissionRequest;
 }
 export type ClientMessage = ClientMessages[keyof ClientMessages];
 
-const defNames = { hello: "Hello", proof: "Proof", visibility: "Visibility", lookup: "Lookup", emote_state: "EmoteState", loadout: "LoadoutState" } as const;
+const defNames = {
+  hello: "Hello", proof: "Proof", visibility: "Visibility", lookup: "Lookup",
+  emote_state: "EmoteState", loadout: "LoadoutState",
+  voice_host_open: "VoiceHostOpen", voice_host_members: "VoiceHostMembers",
+  voice_host_close: "VoiceHostClose", voice_admission_request: "VoiceAdmissionRequest",
+} as const;
 
 /** Returns a validator for one `$defs` entry of schema/v1.json, so the schema stays the single source of limits. */
 function validatorFor(def: string): Validator {

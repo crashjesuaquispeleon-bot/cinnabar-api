@@ -12,7 +12,7 @@ import { admitLoadout, catalog } from "../src/cosmetics";
 const open: Client[] = [];
 const A = "2535400000000411", B = "2535400000000412";
 const item = catalog.items[0]!;
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 afterEach(() => Promise.all(open.splice(0).map((client) => (client.close(), client.closed))));
 
 /** Authenticates a fixture account and owns its cleanup. */
