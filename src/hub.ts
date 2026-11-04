@@ -80,9 +80,24 @@ const releaseKey = (channel: Channel) => `release:${channel}`;
 const VOICE_HOST_LEASE_MS = 90_000;
 const VOICE_ADMISSION_TTL_SECONDS = 120;
 
-interface VoiceRoomRow { room_id: string; session_id: string; owner_xuid: string; open_request_id: string; updated_at: number }
-interface VoiceMemberRow { room_id: string; xuid: string }
-interface VoiceAdmissionRow { token_id: string; expires_at: number }
+interface VoiceRoomRow {
+  [column: string]: string | number;
+  room_id: string;
+  session_id: string;
+  owner_xuid: string;
+  open_request_id: string;
+  updated_at: number;
+}
+interface VoiceMemberRow {
+  [column: string]: string | number;
+  room_id: string;
+  xuid: string;
+}
+interface VoiceAdmissionRow {
+  [column: string]: string | number;
+  token_id: string;
+  expires_at: number;
+}
 
 /**
  * Owns every WebSocket and the release records. Socket tags are fixed at accept time, before the client has
