@@ -1,0 +1,200 @@
+import { exportPKCS8, generateKeyPair, jwtVerify } from "jose";
+import { env } from "cloudflare:workers";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { issueVoiceAdmissionToken, voiceBrokerConfigured } from "../src/voice-admission";
+import { installFakeIssuer, login, type Client } from "./helpers";
+
+const open: Client[] = [];
+const adminRequests: string[] = [];
+const savedEnvironment: Record<string, string | undefined> = {};
+const voiceEnvironmentKeys = [
+  "VOICE_ADMISSION_PRIVATE_KEY",
+  "VOICE_ADMISSION_ISSUER",
+  "VOICE_ADMISSION_AUDIENCE",
+  "VOICE_SFU_ADMIN_URL",
+  "VOICE_SFU_ADMIN_TOKEN",
+] as const;
+
+function track(client: Client): Client {
+  open.push(client);
+  return client;
+}
+
+beforeAll(() => {
+  installFakeIssuer((url) => {
+    if (!url.startsWith("https://voice.test/")) return undefined;
+    adminRequests.push(url);
+    return new Response(null, { status: 204 });
+  });
+});
+
+afterEach(async () => {
+  await Promise.all(open.splice(0).map((client) => (client.close(), client.closed)));
+  Object.assign(env, savedEnvironment);
+  adminRequests.length = 0;
+});
+
+async function configureBroker() {
+  for (const key of voiceEnvironmentKeys) {
+    if (!(key in savedEnvironment)) savedEnvironment[key] = env[key];
+  }
+  const keys = await generateKeyPair("EdDSA", { extractable: true });
+  Object.assign(env, {
+    VOICE_ADMISSION_PRIVATE_KEY: await exportPKCS8(keys.privateKey),
+    VOICE_ADMISSION_ISSUER: "https://api.test/voice",
+    VOICE_ADMISSION_AUDIENCE: "cinnabar-voice-sfu",
+    VOICE_SFU_ADMIN_URL: "https://voice.test",
+    VOICE_SFU_ADMIN_TOKEN: "0123456789abcdef0123456789abcdef",
+  });
+  return keys;
+}
+
+describe("voice admission signing", () => {
+  it("signs an EdDSA lease with broker-derived identity, partida IDs and a two-minute expiry", async () => {
+    const keys = await configureBroker();
+    expect(voiceBrokerConfigured(env)).toBe(true);
+    const now = Date.now();
+    const roomID = "00112233-4455-6677-8899-aabbccddeeff";
+    const sessionID = "10112233-4455-6677-8899-aabbccddeeff";
+    const tokenID = "20112233-4455-6677-8899-aabbccddeeff";
+    const result = await issueVoiceAdmissionToken(env, {
+      xuid: "2535400000000001",
+      roomID,
+      sessionID,
+      tokenID,
+      now,
+      ttlSeconds: 120,
+    });
+    expect(result).not.toBeNull();
+    const verified = await jwtVerify(result!.token, keys.publicKey, {
+      issuer: "https://api.test/voice",
+      audience: "cinnabar-voice-sfu",
+      currentDate: new Date(now),
+    });
+    expect(verified.protectedHeader).toMatchObject({ alg: "EdDSA", typ: "JWT" });
+    expect(verified.payload).toMatchObject({
+      sub: "2535400000000001",
+      xuid: "2535400000000001",
+      room_id: roomID,
+      session_id: sessionID,
+      jti: tokenID,
+    });
+    expect(result!.expiresAt - Number(verified.payload.iat)).toBe(120);
+  });
+
+  it("refuses to issue when production key or secure SFU revocation credentials are absent", async () => {
+    expect(voiceBrokerConfigured({})).toBe(false);
+    expect(await issueVoiceAdmissionToken({}, {
+      xuid: "1",
+      roomID: crypto.randomUUID(),
+      sessionID: crypto.randomUUID(),
+      tokenID: crypto.randomUUID(),
+      now: Date.now(),
+      ttlSeconds: 120,
+    })).toBeNull();
+    const envWithoutAdmin = {
+      VOICE_ADMISSION_PRIVATE_KEY: "configured",
+      VOICE_SFU_ADMIN_URL: "http://voice.test",
+      VOICE_SFU_ADMIN_TOKEN: "0123456789abcdef0123456789abcdef",
+    };
+    expect(voiceBrokerConfigured(envWithoutAdmin)).toBe(false);
+  });
+});
+
+describe("authenticated FriendHost voice membership", () => {
+  it("issues only for a live authenticated room member and revokes a removed member", async () => {
+    const keys = await configureBroker();
+    const hostXuid = "2535400000000001";
+    const guestXuid = "2535400000000002";
+    const outsiderXuid = "2535400000000003";
+    const host = track((await login({ xuid: hostXuid })).client);
+    const guest = track((await login({ xuid: guestXuid })).client);
+    const outsider = track((await login({ xuid: outsiderXuid })).client);
+
+    const openID = crypto.randomUUID();
+    host.send({ type: "voice_host_open", request_id: openID });
+    const room = await host.next();
+    expect(room).toMatchObject({ type: "voice_room", request_id: openID });
+    expect(typeof room.room_id).toBe("string");
+    expect(typeof room.session_id).toBe("string");
+
+    const membersID = crypto.randomUUID();
+    host.send({ type: "voice_host_members", request_id: membersID, members: [guestXuid] });
+    expect(await host.next()).toEqual({
+      type: "voice_members_updated",
+      request_id: membersID,
+      count: 2,
+    });
+
+    const admissionID = crypto.randomUUID();
+    guest.send({ type: "voice_admission_request", request_id: admissionID });
+    const admission = await guest.next();
+    expect(admission).toMatchObject({ type: "voice_admission", request_id: admissionID });
+    const jwt = await jwtVerify(admission.token as string, keys.publicKey, {
+      issuer: "https://api.test/voice",
+      audience: "cinnabar-voice-sfu",
+    });
+    expect(jwt.payload).toMatchObject({
+      sub: guestXuid,
+      xuid: guestXuid,
+      room_id: room.room_id,
+      session_id: room.session_id,
+    });
+
+    const outsiderRequestID = crypto.randomUUID();
+    outsider.send({ type: "voice_admission_request", request_id: outsiderRequestID });
+    expect(await outsider.next()).toEqual({
+      type: "voice_error",
+      request_id: outsiderRequestID,
+      code: "not_in_room",
+    });
+
+    const removedID = crypto.randomUUID();
+    host.send({ type: "voice_host_members", request_id: removedID, members: [] });
+    expect(await host.next()).toEqual({
+      type: "voice_members_updated",
+      request_id: removedID,
+      count: 1,
+    });
+    expect(adminRequests).toContain(
+      `https://voice.test/v1/admin/rooms/${room.room_id}/admissions/${jwt.payload.jti}/revoke`,
+    );
+
+    const afterRemovalID = crypto.randomUUID();
+    guest.send({ type: "voice_admission_request", request_id: afterRemovalID });
+    expect(await guest.next()).toEqual({
+      type: "voice_error",
+      request_id: afterRemovalID,
+      code: "not_in_room",
+    });
+
+    const closeID = crypto.randomUUID();
+    host.send({ type: "voice_host_close", request_id: closeID });
+    expect(await host.next()).toEqual({
+      type: "voice_closed",
+      request_id: closeID,
+      sfu_closed: true,
+    });
+    expect(adminRequests).toContain(
+      `https://voice.test/v1/admin/rooms/${room.room_id}/sessions/${room.session_id}/close`,
+    );
+  });
+
+  it("rejects a host-reported guest without a live authenticated Cinnabar session", async () => {
+    await configureBroker();
+    const hostXuid = "2535400000000004";
+    const unavailableXuid = "2535400000000005";
+    const host = track((await login({ xuid: hostXuid })).client);
+    const openID = crypto.randomUUID();
+    host.send({ type: "voice_host_open", request_id: openID });
+    expect((await host.next()).type).toBe("voice_room");
+
+    const membersID = crypto.randomUUID();
+    host.send({ type: "voice_host_members", request_id: membersID, members: [unavailableXuid] });
+    expect(await host.next()).toEqual({
+      type: "voice_error",
+      request_id: membersID,
+      code: "member_unavailable",
+    });
+  });
+});

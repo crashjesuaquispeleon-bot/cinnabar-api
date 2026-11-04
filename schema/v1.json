@@ -157,6 +157,18 @@
         },
         {
           "$ref": "#/$defs/LoadoutState"
+        },
+        {
+          "$ref": "#/$defs/VoiceHostOpen"
+        },
+        {
+          "$ref": "#/$defs/VoiceHostMembers"
+        },
+        {
+          "$ref": "#/$defs/VoiceHostClose"
+        },
+        {
+          "$ref": "#/$defs/VoiceAdmissionRequest"
         }
       ]
     },
