@@ -35,6 +35,7 @@ import {
   type EmoteState,
   type LoadoutState,
   type VoiceHostMembers,
+  type VoiceSignal,
   EMOTE_TTL_MS,
 } from "./protocol";
 
@@ -409,6 +410,8 @@ export class Hub extends DurableObject<Env> {
         if (msg.type === "voice_host_members") return this.onVoiceHostMembers(ws, attachment, msg, now);
         if (msg.type === "voice_host_close") return this.onVoiceHostClose(ws, attachment, msg.request_id);
         if (msg.type === "voice_admission_request") return this.onVoiceAdmissionRequest(ws, attachment, msg.request_id, now);
+        if (msg.type === "voice_signal") return this.onVoiceSignal(ws, attachment, msg, now);
+        if (msg.type === "voice_peer_session_request") return this.onVoicePeerSessionRequest(ws, attachment, msg.request_id, now);
         return this.close(ws, Close.policyViolation, "already authenticated");
     }
   }
@@ -503,10 +506,8 @@ export class Hub extends DurableObject<Env> {
 
   /** Opens a broker-generated room for one authenticated FriendHost owner. */
   private async onVoiceHostOpen(ws: WebSocket, state: Ready, requestId: string, now: number): Promise<void> {
-    if (!voiceBrokerConfigured(this.env)) {
-      send(ws, { type: "voice_error", request_id: requestId, code: "unavailable" });
-      return;
-    }
+    // Room membership and P2P signaling are broker-only and do not require an SFU.
+    // SFU admission issuance remains separately gated by voiceBrokerConfigured.
     const existing = this.voiceRoomForOwner(state.xuid);
     if (existing) {
       if (existing.open_request_id === requestId &&
@@ -707,6 +708,88 @@ export class Hub extends DurableObject<Env> {
     send(ws, { type: "voice_admission", request_id: requestId, token: admission.token, expires_at: admission.expiresAt });
   }
 
+  /** Returns the server-derived session and deterministic offerer role for an exact two-member room. */
+  private onVoicePeerSessionRequest(ws: WebSocket, state: Ready, requestId: string, now: number): void {
+    const membership = this.voiceMembership(state.xuid);
+    const room = membership ? this.voiceRoomByID(membership.room_id) : undefined;
+    if (!membership || !room || now - room.updated_at > VOICE_HOST_LEASE_MS ||
+        !this.hasLiveAccount(state.xuid, now) || !this.hasLiveAccount(room.owner_xuid, now)) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "not_in_room" });
+      return;
+    }
+    const members = this.voiceMembers(room.room_id);
+    if (members.length !== 2 || !members.some((member) => member.xuid === state.xuid)) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "unavailable" });
+      return;
+    }
+    const peer = members.find((member) => member.xuid !== state.xuid);
+    if (!peer || !this.hasLiveAccount(peer.xuid, now)) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "member_unavailable" });
+      return;
+    }
+    send(ws, {
+      type: "voice_peer_session",
+      request_id: requestId,
+      session_id: room.session_id,
+      offerer: state.xuid === room.owner_xuid,
+    });
+  }
+
+  /**
+   * Relays one bounded WebRTC signaling message to the only other member of the
+   * sender's current two-person room. The client supplies no target identity or
+   * room ID; both are derived from authenticated broker state.
+   */
+  private onVoiceSignal(ws: WebSocket, state: Ready, message: VoiceSignal, now: number): void {
+    const membership = this.voiceMembership(state.xuid);
+    const room = membership ? this.voiceRoomByID(membership.room_id) : undefined;
+    if (!membership || !room || room.session_id !== message.session_id ||
+        now - room.updated_at > VOICE_HOST_LEASE_MS ||
+        !this.hasLiveAccount(room.owner_xuid, now)) {
+      send(ws, { type: "voice_error", request_id: message.request_id, code: "not_in_room" });
+      return;
+    }
+
+    const members = this.voiceMembers(room.room_id);
+    if (members.length !== 2 || !members.some((member) => member.xuid === state.xuid)) {
+      send(ws, { type: "voice_error", request_id: message.request_id, code: "unavailable" });
+      return;
+    }
+
+    // The broker fixes the offerer as the FriendHost owner. A guest cannot
+    // replace the host's offer, and the host cannot inject an answer.
+    if ((message.signal_type === "offer" && state.xuid !== room.owner_xuid) ||
+        (message.signal_type === "answer" && state.xuid === room.owner_xuid)) {
+      send(ws, { type: "voice_error", request_id: message.request_id, code: "unavailable" });
+      return;
+    }
+
+    const peer = members.find((member) => member.xuid !== state.xuid);
+    if (!peer || !this.hasLiveAccount(peer.xuid, now)) {
+      send(ws, { type: "voice_error", request_id: message.request_id, code: "not_in_room" });
+      return;
+    }
+
+    let delivered = false;
+    for (const recipient of this.byXuid.get(peer.xuid) ?? []) {
+      const recipientState = this.sessions.get(recipient);
+      if (recipient.readyState !== WebSocket.OPEN || recipientState?.stage !== "ready" ||
+          this.idleDeadline(recipient, recipientState) <= now) continue;
+      send(recipient, {
+        type: "voice_peer_signal",
+        session_id: room.session_id,
+        signal_type: message.signal_type,
+        payload: message.payload,
+      });
+      delivered = true;
+    }
+    if (!delivered) {
+      send(ws, { type: "voice_error", request_id: message.request_id, code: "not_in_room" });
+      return;
+    }
+    send(ws, { type: "voice_signal_sent", request_id: message.request_id });
+  }
+
   private voiceRoomForOwner(ownerXuid: string): VoiceRoomRow | undefined {
     return this.ctx.storage.sql.exec<VoiceRoomRow>(
       "SELECT room_id, session_id, owner_xuid, open_request_id, updated_at FROM voice_rooms WHERE owner_xuid = ?",
@@ -775,6 +858,9 @@ export class Hub extends DurableObject<Env> {
       this.ctx.storage.sql.exec("DELETE FROM voice_admissions WHERE room_id = ?", room.room_id);
       this.ctx.storage.sql.exec("DELETE FROM voice_rooms WHERE room_id = ?", room.room_id);
     });
+    // P2P rooms have no remote media server to close. Removing broker membership
+    // immediately revokes further signaling; an active peer is closed by its lease check.
+    if (!voiceBrokerConfigured(this.env)) return true;
     return voiceSfuAdmin(
       this.env,
       `/v1/admin/rooms/${room.room_id}/sessions/${room.session_id}/close`,

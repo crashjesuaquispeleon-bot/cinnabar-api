@@ -169,6 +169,12 @@
         },
         {
           "$ref": "#/$defs/VoiceAdmissionRequest"
+        },
+        {
+          "$ref": "#/$defs/VoiceSignal"
+        },
+        {
+          "$ref": "#/$defs/VoicePeerSessionRequest"
         }
       ]
     },
@@ -315,6 +321,15 @@
         },
         {
           "$ref": "#/$defs/VoiceError"
+        },
+        {
+          "$ref": "#/$defs/VoiceSignalSent"
+        },
+        {
+          "$ref": "#/$defs/VoicePeerSignal"
+        },
+        {
+          "$ref": "#/$defs/VoicePeerSession"
         }
       ]
     },
@@ -1545,6 +1560,122 @@
             "not_in_room",
             "host_lease_expired"
           ]
+        }
+      }
+    },
+    "VoiceSignal": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id",
+        "session_id",
+        "signal_type",
+        "payload"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_signal"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "signal_type": {
+          "enum": [
+            "offer",
+            "answer",
+            "candidate"
+          ]
+        },
+        "payload": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        }
+      },
+      "description": "Relays bounded WebRTC negotiation data only to the other authenticated member of the sender's current two-person FriendHost room. The room and peer are resolved by the broker, never supplied by the client."
+    },
+    "VoiceSignalSent": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_signal_sent"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        }
+      }
+    },
+    "VoicePeerSignal": {
+      "type": "object",
+      "required": [
+        "type",
+        "session_id",
+        "signal_type",
+        "payload"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_peer_signal"
+        },
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "signal_type": {
+          "enum": [
+            "offer",
+            "answer",
+            "candidate"
+          ]
+        },
+        "payload": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        }
+      }
+    },
+    "VoicePeerSessionRequest": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_peer_session_request"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        }
+      }
+    },
+    "VoicePeerSession": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id",
+        "session_id",
+        "offerer"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_peer_session"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "offerer": {
+          "type": "boolean"
         }
       }
     }

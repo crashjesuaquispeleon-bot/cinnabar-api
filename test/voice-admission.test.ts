@@ -264,4 +264,150 @@ describe("authenticated FriendHost voice membership", () => {
       code: "member_unavailable",
     });
   });
+  it("relays P2P offer, answer and ICE only between the two current room members", async () => {
+    await configureBroker();
+    const host = track((await login({ xuid: "2535400000000101" })).client);
+    const guest = track((await login({ xuid: "2535400000000102" })).client);
+    const outsider = track((await login({ xuid: "2535400000000103" })).client);
+
+    const openID = crypto.randomUUID();
+    host.send({ type: "voice_host_open", request_id: openID });
+    const room = await host.next();
+    expect(room).toMatchObject({ type: "voice_room", request_id: openID });
+
+    const rosterID = crypto.randomUUID();
+    host.send({ type: "voice_host_members", request_id: rosterID, members: ["2535400000000102"] });
+    expect(await host.next()).toMatchObject({ type: "voice_members_updated", request_id: rosterID, count: 2 });
+
+    const offerID = crypto.randomUUID();
+    host.send({
+      type: "voice_signal", request_id: offerID, session_id: room.session_id,
+      signal_type: "offer", payload: "v=0\\r\\no=- test-offer",
+    });
+    expect(await guest.next()).toEqual({
+      type: "voice_peer_signal", session_id: room.session_id,
+      signal_type: "offer", payload: "v=0\\r\\no=- test-offer",
+    });
+    expect(await host.next()).toEqual({ type: "voice_signal_sent", request_id: offerID });
+
+    const answerID = crypto.randomUUID();
+    guest.send({
+      type: "voice_signal", request_id: answerID, session_id: room.session_id,
+      signal_type: "answer", payload: "v=0\\r\\no=- test-answer",
+    });
+    expect(await host.next()).toEqual({
+      type: "voice_peer_signal", session_id: room.session_id,
+      signal_type: "answer", payload: "v=0\\r\\no=- test-answer",
+    });
+    expect(await guest.next()).toEqual({ type: "voice_signal_sent", request_id: answerID });
+
+    const candidateID = crypto.randomUUID();
+    guest.send({
+      type: "voice_signal", request_id: candidateID, session_id: room.session_id,
+      signal_type: "candidate", payload: "candidate:1 1 UDP 1 192.0.2.1 5000 typ host",
+    });
+    expect(await host.next()).toMatchObject({
+      type: "voice_peer_signal", session_id: room.session_id, signal_type: "candidate",
+    });
+    expect(await guest.next()).toEqual({ type: "voice_signal_sent", request_id: candidateID });
+
+    const outsiderID = crypto.randomUUID();
+    outsider.send({
+      type: "voice_signal", request_id: outsiderID, session_id: room.session_id,
+      signal_type: "offer", payload: "forged",
+    });
+    expect(await outsider.next()).toEqual({
+      type: "voice_error", request_id: outsiderID, code: "not_in_room",
+    });
+
+    const wrongRoleID = crypto.randomUUID();
+    host.send({
+      type: "voice_signal", request_id: wrongRoleID, session_id: room.session_id,
+      signal_type: "answer", payload: "host-cannot-answer",
+    });
+    expect(await host.next()).toEqual({
+      type: "voice_error", request_id: wrongRoleID, code: "unavailable",
+    });
+
+    const staleID = crypto.randomUUID();
+    host.send({
+      type: "voice_signal", request_id: staleID, session_id: crypto.randomUUID(),
+      signal_type: "offer", payload: "stale-session",
+    });
+    expect(await host.next()).toEqual({
+      type: "voice_error", request_id: staleID, code: "not_in_room",
+    });
+  });
+
+  it("rejects oversized P2P signaling payloads at protocol validation", async () => {
+    const { decodeClientMessage } = await import("../src/protocol");
+    const decoded = decodeClientMessage(JSON.stringify({
+      type: "voice_signal", request_id: crypto.randomUUID(), session_id: crypto.randomUUID(),
+      signal_type: "candidate", payload: "x".repeat(8193),
+    }));
+    expect(decoded.kind).toBe("invalid");
+  });
+
+  it("returns the current session and server-derived offerer role to exactly two members", async () => {
+    await configureBroker();
+    const host = track((await login({ xuid: "2535400000000201" })).client);
+    const guest = track((await login({ xuid: "2535400000000202" })).client);
+    const outsider = track((await login({ xuid: "2535400000000203" })).client);
+
+    const openID = crypto.randomUUID();
+    host.send({ type: "voice_host_open", request_id: openID });
+    const room = await host.next();
+    expect(room).toMatchObject({ type: "voice_room", request_id: openID });
+
+    const rosterID = crypto.randomUUID();
+    host.send({ type: "voice_host_members", request_id: rosterID, members: ["2535400000000202"] });
+    expect(await host.next()).toMatchObject({ type: "voice_members_updated", request_id: rosterID, count: 2 });
+
+    const hostRequest = crypto.randomUUID();
+    host.send({ type: "voice_peer_session_request", request_id: hostRequest });
+    expect(await host.next()).toEqual({
+      type: "voice_peer_session", request_id: hostRequest, session_id: room.session_id, offerer: true,
+    });
+
+    const guestRequest = crypto.randomUUID();
+    guest.send({ type: "voice_peer_session_request", request_id: guestRequest });
+    expect(await guest.next()).toEqual({
+      type: "voice_peer_session", request_id: guestRequest, session_id: room.session_id, offerer: false,
+    });
+
+    const outsiderRequest = crypto.randomUUID();
+    outsider.send({ type: "voice_peer_session_request", request_id: outsiderRequest });
+    expect(await outsider.next()).toEqual({
+      type: "voice_error", request_id: outsiderRequest, code: "not_in_room",
+    });
+  });
+
+  it("opens and closes an authenticated P2P room without any SFU credentials", async () => {
+    for (const key of voiceEnvironmentKeys) {
+      if (!(key in savedEnvironment)) savedEnvironment[key] = env[key];
+      Object.assign(env, { [key]: undefined });
+    }
+    const host = track((await login({ xuid: "2535400000000301" })).client);
+    const guest = track((await login({ xuid: "2535400000000302" })).client);
+
+    const openID = crypto.randomUUID();
+    host.send({ type: "voice_host_open", request_id: openID });
+    const room = await host.next();
+    expect(room).toMatchObject({ type: "voice_room", request_id: openID });
+
+    const membersID = crypto.randomUUID();
+    host.send({ type: "voice_host_members", request_id: membersID, members: ["2535400000000302"] });
+    expect(await host.next()).toMatchObject({ type: "voice_members_updated", request_id: membersID, count: 2 });
+
+    const peerID = crypto.randomUUID();
+    guest.send({ type: "voice_peer_session_request", request_id: peerID });
+    expect(await guest.next()).toEqual({
+      type: "voice_peer_session", request_id: peerID, session_id: room.session_id, offerer: false,
+    });
+
+    const closeID = crypto.randomUUID();
+    host.send({ type: "voice_host_close", request_id: closeID });
+    expect(await host.next()).toEqual({ type: "voice_closed", request_id: closeID, sfu_closed: true });
+  });
+
 });
