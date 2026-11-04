@@ -198,9 +198,9 @@ describe("authenticated FriendHost voice membership", () => {
     const signingGate = new Promise<void>((resolve) => { releaseSigning = resolve; });
     const originalSign = crypto.subtle.sign.bind(crypto.subtle);
     const signSpy = vi.spyOn(crypto.subtle, "sign").mockImplementation(async (
-      algorithm: AlgorithmIdentifier,
-      key: CryptoKey,
-      data: BufferSource,
+      algorithm,
+      key,
+      data,
     ) => {
       announceSigning();
       await signingGate;
