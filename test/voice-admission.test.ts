@@ -1,6 +1,6 @@
 import { exportPKCS8, generateKeyPair, jwtVerify } from "jose";
 import { env } from "cloudflare:workers";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { issueVoiceAdmissionToken, voiceBrokerConfigured } from "../src/voice-admission";
 import { installFakeIssuer, login, type Client } from "./helpers";
 
@@ -178,6 +178,111 @@ describe("authenticated FriendHost voice membership", () => {
     expect(adminRequests).toContain(
       `https://voice.test/v1/admin/rooms/${room.room_id}/sessions/${room.session_id}/close`,
     );
+  });
+
+  it("does not deliver a signed admission after the host removes the member", async () => {
+    await configureBroker();
+    const host = track((await login({ xuid: "2535400000000011" })).client);
+    const guest = track((await login({ xuid: "2535400000000012" })).client);
+
+    const openID = crypto.randomUUID();
+    host.send({ type: "voice_host_open", request_id: openID });
+    const room = await host.next();
+    const membersID = crypto.randomUUID();
+    host.send({ type: "voice_host_members", request_id: membersID, members: ["2535400000000012"] });
+    expect(await host.next()).toMatchObject({ type: "voice_members_updated", request_id: membersID, count: 2 });
+
+    let announceSigning!: () => void;
+    let releaseSigning!: () => void;
+    const signingStarted = new Promise<void>((resolve) => { announceSigning = resolve; });
+    const signingGate = new Promise<void>((resolve) => { releaseSigning = resolve; });
+    const originalSign = crypto.subtle.sign.bind(crypto.subtle);
+    const signSpy = vi.spyOn(crypto.subtle, "sign").mockImplementation(async (
+      algorithm: AlgorithmIdentifier,
+      key: CryptoKey,
+      data: BufferSource,
+    ) => {
+      announceSigning();
+      await signingGate;
+      return originalSign(algorithm, key, data);
+    });
+
+    try {
+      guest.send({ type: "voice_admission_request", request_id: crypto.randomUUID() });
+      await signingStarted;
+
+      const removeID = crypto.randomUUID();
+      host.send({ type: "voice_host_members", request_id: removeID, members: [] });
+      expect(await host.next()).toEqual({
+        type: "voice_members_updated",
+        request_id: removeID,
+        count: 1,
+      });
+
+      releaseSigning();
+      expect(await guest.next()).toMatchObject({
+        type: "voice_error",
+        code: "not_in_room",
+      });
+    } finally {
+      releaseSigning();
+      signSpy.mockRestore();
+    }
+    expect(room.type).toBe("voice_room");
+  });
+
+  it("stops issuing admissions before waiting for the SFU room-close request", async () => {
+    await configureBroker();
+    const host = track((await login({ xuid: "2535400000000021" })).client);
+    const guest = track((await login({ xuid: "2535400000000022" })).client);
+
+    const openID = crypto.randomUUID();
+    host.send({ type: "voice_host_open", request_id: openID });
+    const room = await host.next();
+    const membersID = crypto.randomUUID();
+    host.send({ type: "voice_host_members", request_id: membersID, members: ["2535400000000022"] });
+    expect(await host.next()).toMatchObject({ type: "voice_members_updated", request_id: membersID, count: 2 });
+
+    const closeURL = `https://voice.test/v1/admin/rooms/${room.room_id}/sessions/${room.session_id}/close`;
+    const fetchMock = vi.mocked(globalThis.fetch);
+    const previousFetch = fetchMock.getMockImplementation();
+    if (!previousFetch) throw new Error("Expected the fake issuer fetch mock to be installed");
+
+    let announceClose!: () => void;
+    let releaseClose!: () => void;
+    const closeStarted = new Promise<void>((resolve) => { announceClose = resolve; });
+    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === closeURL) {
+        announceClose();
+        await closeGate;
+        return new Response(null, { status: 204 });
+      }
+      return previousFetch(input, init);
+    });
+
+    try {
+      const closeID = crypto.randomUUID();
+      host.send({ type: "voice_host_close", request_id: closeID });
+      await closeStarted;
+
+      guest.send({ type: "voice_admission_request", request_id: crypto.randomUUID() });
+      expect(await guest.next()).toMatchObject({
+        type: "voice_error",
+        code: "not_in_room",
+      });
+
+      releaseClose();
+      expect(await host.next()).toEqual({
+        type: "voice_closed",
+        request_id: closeID,
+        sfu_closed: true,
+      });
+    } finally {
+      releaseClose();
+      fetchMock.mockImplementation(previousFetch);
+    }
   });
 
   it("replays the same open request but rotates the room for a new host-world lifecycle", async () => {
