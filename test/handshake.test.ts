@@ -7,7 +7,7 @@ import { clientKey, connect, hello, hub, installFakeIssuer, issuer, login, mintT
 const open: Client[] = [];
 const track = (client: Client) => (open.push(client), client);
 
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 afterEach(() => Promise.all(open.splice(0).map((c) => (c.close(), c.closed))));
 
 /** Sends hello with `token` and expects the unauthorized error followed by close 4401. */
