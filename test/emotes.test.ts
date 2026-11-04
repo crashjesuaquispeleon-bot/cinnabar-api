@@ -9,7 +9,7 @@ const open: Client[] = [];
 const A = "2535400000000311";
 const B = "2535400000000312";
 const CLIP = "cinnabar:twerk";
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 afterEach(() => Promise.all(open.splice(0).map((c) => (c.close(), c.closed))));
 
 /** Authenticates an account and keeps its socket under fixture cleanup. */
