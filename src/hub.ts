@@ -506,10 +506,8 @@ export class Hub extends DurableObject<Env> {
 
   /** Opens a broker-generated room for one authenticated FriendHost owner. */
   private async onVoiceHostOpen(ws: WebSocket, state: Ready, requestId: string, now: number): Promise<void> {
-    if (!voiceBrokerConfigured(this.env)) {
-      send(ws, { type: "voice_error", request_id: requestId, code: "unavailable" });
-      return;
-    }
+    // Room membership and P2P signaling are broker-only and do not require an SFU.
+    // SFU admission issuance remains separately gated by voiceBrokerConfigured.
     const existing = this.voiceRoomForOwner(state.xuid);
     if (existing) {
       if (existing.open_request_id === requestId &&
