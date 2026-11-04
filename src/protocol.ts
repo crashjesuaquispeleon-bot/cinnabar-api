@@ -83,6 +83,13 @@ export interface VoiceAdmissionRequest {
   type: "voice_admission_request";
   request_id: string;
 }
+export interface VoiceSignal {
+  type: "voice_signal";
+  request_id: string;
+  session_id: string;
+  signal_type: "offer" | "answer" | "candidate";
+  payload: string;
+}
 export interface Lookup {
   type: "lookup";
   id: number;
@@ -129,6 +136,8 @@ export type ServerMessage =
   | { type: "voice_members_updated"; request_id: string; count: number }
   | { type: "voice_closed"; request_id: string; sfu_closed: boolean }
   | { type: "voice_admission"; request_id: string; token: string; expires_at: number }
+  | { type: "voice_signal_sent"; request_id: string }
+  | { type: "voice_peer_signal"; session_id: string; signal_type: "offer" | "answer" | "candidate"; payload: string }
   | { type: "voice_error"; request_id: string; code: "unavailable" | "not_a_host" | "room_not_open" | "invalid_members" | "member_unavailable" | "already_in_room" | "not_in_room" | "host_lease_expired" };
 
 interface ClientMessages {
@@ -142,6 +151,7 @@ interface ClientMessages {
   voice_host_members: VoiceHostMembers;
   voice_host_close: VoiceHostClose;
   voice_admission_request: VoiceAdmissionRequest;
+  voice_signal: VoiceSignal;
 }
 export type ClientMessage = ClientMessages[keyof ClientMessages];
 
@@ -150,6 +160,7 @@ const defNames = {
   emote_state: "EmoteState", loadout: "LoadoutState",
   voice_host_open: "VoiceHostOpen", voice_host_members: "VoiceHostMembers",
   voice_host_close: "VoiceHostClose", voice_admission_request: "VoiceAdmissionRequest",
+  voice_signal: "VoiceSignal",
 } as const;
 
 /** Returns a validator for one `$defs` entry of schema/v1.json, so the schema stays the single source of limits. */
