@@ -372,7 +372,7 @@ GitHub 403/429, `source_unavailable` for other upstream HTTP failures, or
 
 The authenticated WebSocket supports a host-owned voice-room flow:
 
-1. An authenticated FriendHost owner sends `voice_host_open`. The Hub creates opaque room and session UUIDs; request fields cannot select either one.
+1. An authenticated FriendHost owner sends `voice_host_open`. The Hub creates opaque room and session UUIDs; request fields cannot select either one. Repeating the same `request_id` is idempotent, while a new open request retires that owner's previous room before creating a new host-world session.
 2. The host sends `voice_host_members` with the full guest XUID roster. The Hub derives the host XUID from the authenticated socket, adds that owner itself, requires every guest to have a live authenticated Cinnabar API session, and enforces one room per account. The host must repeat this full-roster message at least every 30 seconds; a 90-second host lease closes stale rooms.
 3. A room member sends `voice_admission_request` without an XUID, room ID or session ID. The Hub resolves the authenticated socket's XUID and stored membership and signs a two-minute EdDSA JWT with the broker-only Ed25519 private key.
 4. Removed members' issued JTIs are immediately revoked through the SFU admin endpoint. If the SFU admin endpoint is unavailable, the removed member cannot renew, and the SFU's two-minute lease expiry is the fail-safe. Room closure asks the SFU to close the exact room/session pair.

@@ -180,6 +180,32 @@ describe("authenticated FriendHost voice membership", () => {
     );
   });
 
+  it("replays the same open request but rotates the room for a new host-world lifecycle", async () => {
+    await configureBroker();
+    const host = track((await login({ xuid: "2535400000000006" })).client);
+    const firstID = crypto.randomUUID();
+    host.send({ type: "voice_host_open", request_id: firstID });
+    const first = await host.next();
+    host.send({ type: "voice_host_open", request_id: firstID });
+    const replay = await host.next();
+    expect(replay).toMatchObject({
+      type: "voice_room",
+      request_id: firstID,
+      room_id: first.room_id,
+      session_id: first.session_id,
+    });
+
+    const nextID = crypto.randomUUID();
+    host.send({ type: "voice_host_open", request_id: nextID });
+    const next = await host.next();
+    expect(next).toMatchObject({ type: "voice_room", request_id: nextID });
+    expect(next.room_id).not.toBe(first.room_id);
+    expect(next.session_id).not.toBe(first.session_id);
+    expect(adminRequests).toContain(
+      `https://voice.test/v1/admin/rooms/${first.room_id}/sessions/${first.session_id}/close`,
+    );
+  });
+
   it("rejects a host-reported guest without a live authenticated Cinnabar session", async () => {
     await configureBroker();
     const hostXuid = "2535400000000004";

@@ -30,9 +30,13 @@ export function voiceBrokerConfigured(env: VoiceEnvironment): boolean {
   if (!env.VOICE_ADMISSION_PRIVATE_KEY || !env.VOICE_SFU_ADMIN_URL ||
       !env.VOICE_SFU_ADMIN_TOKEN || !ADMIN_TOKEN.test(env.VOICE_SFU_ADMIN_TOKEN)) return false;
   try {
-    const url = new URL(env.VOICE_SFU_ADMIN_URL);
-    return url.protocol === "https:" && !url.username && !url.password &&
-      (url.pathname === "/" || url.pathname === "") && !url.search && !url.hash;
+    const admin = new URL(env.VOICE_SFU_ADMIN_URL);
+    const issuer = new URL(env.VOICE_ADMISSION_ISSUER?.trim() || DEFAULT_VOICE_ISSUER);
+    const audience = env.VOICE_ADMISSION_AUDIENCE?.trim() || DEFAULT_VOICE_AUDIENCE;
+    return admin.protocol === "https:" && !admin.username && !admin.password &&
+      (admin.pathname === "/" || admin.pathname === "") && !admin.search && !admin.hash &&
+      issuer.protocol === "https:" && !issuer.username && !issuer.password &&
+      audience.length > 0 && audience.length <= 256;
   } catch {
     return false;
   }
@@ -52,22 +56,27 @@ export async function issueVoiceAdmissionToken(
   if (!issuer.startsWith("https://") || audience.length === 0) return null;
   const issuedAt = Math.floor(input.now / 1000);
   const expiresAt = issuedAt + input.ttlSeconds;
-  const privateKey = await importPKCS8(env.VOICE_ADMISSION_PRIVATE_KEY, "EdDSA");
-  const token = await new SignJWT({
-    xuid: input.xuid,
-    room_id: input.roomID,
-    session_id: input.sessionID,
-  })
-    .setProtectedHeader({ alg: "EdDSA", typ: "JWT" })
-    .setIssuer(issuer)
-    .setAudience(audience)
-    .setSubject(input.xuid)
-    .setJti(input.tokenID)
-    .setIssuedAt(issuedAt)
-    .setNotBefore(issuedAt)
-    .setExpirationTime(expiresAt)
-    .sign(privateKey);
-  return { token, expiresAt };
+  try {
+    const privateKey = await importPKCS8(env.VOICE_ADMISSION_PRIVATE_KEY, "EdDSA");
+    const token = await new SignJWT({
+      xuid: input.xuid,
+      room_id: input.roomID,
+      session_id: input.sessionID,
+    })
+      .setProtectedHeader({ alg: "EdDSA", typ: "JWT" })
+      .setIssuer(issuer)
+      .setAudience(audience)
+      .setSubject(input.xuid)
+      .setJti(input.tokenID)
+      .setIssuedAt(issuedAt)
+      .setNotBefore(issuedAt)
+      .setExpirationTime(expiresAt)
+      .sign(privateKey);
+    return { token, expiresAt };
+  } catch {
+    // A malformed/mismatched secret disables admission; never close an authenticated API socket.
+    return null;
+  }
 }
 
 /** Calls only canonical SFU admin endpoints over HTTPS; bearer credentials are never redirected or logged. */

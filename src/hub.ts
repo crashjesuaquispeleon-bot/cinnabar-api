@@ -80,7 +80,7 @@ const releaseKey = (channel: Channel) => `release:${channel}`;
 const VOICE_HOST_LEASE_MS = 90_000;
 const VOICE_ADMISSION_TTL_SECONDS = 120;
 
-interface VoiceRoomRow { room_id: string; session_id: string; owner_xuid: string; updated_at: number }
+interface VoiceRoomRow { room_id: string; session_id: string; owner_xuid: string; open_request_id: string; updated_at: number }
 interface VoiceMemberRow { room_id: string; xuid: string }
 interface VoiceAdmissionRow { token_id: string; expires_at: number }
 
@@ -126,7 +126,8 @@ export class Hub extends DurableObject<Env> {
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS hub_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS voice_rooms (
       room_id TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE,
-      owner_xuid TEXT NOT NULL UNIQUE, updated_at INTEGER NOT NULL
+      owner_xuid TEXT NOT NULL UNIQUE, open_request_id TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
     )`);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS voice_room_members (
       xuid TEXT PRIMARY KEY, room_id TEXT NOT NULL, joined_at INTEGER NOT NULL
@@ -493,10 +494,15 @@ export class Hub extends DurableObject<Env> {
     }
     const existing = this.voiceRoomForOwner(state.xuid);
     if (existing) {
-      if (now - existing.updated_at <= VOICE_HOST_LEASE_MS && this.hasLiveAccount(state.xuid, now)) {
+      if (existing.open_request_id === requestId &&
+          now - existing.updated_at <= VOICE_HOST_LEASE_MS &&
+          this.hasLiveAccount(state.xuid, now)) {
         send(ws, { type: "voice_room", request_id: requestId, room_id: existing.room_id, session_id: existing.session_id });
         return;
       }
+      // A new open request denotes a new host-world lifecycle. Retire the previous
+      // room before assigning a new opaque room/session pair; request_id is only
+      // an idempotency key, never a membership or identity claim.
       await this.closeVoiceRoom(existing);
     }
     const membership = this.voiceMembership(state.xuid);
@@ -508,8 +514,8 @@ export class Hub extends DurableObject<Env> {
     const sessionID = crypto.randomUUID();
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
-        "INSERT INTO voice_rooms (room_id, session_id, owner_xuid, updated_at) VALUES (?, ?, ?, ?)",
-        roomID, sessionID, state.xuid, now,
+        "INSERT INTO voice_rooms (room_id, session_id, owner_xuid, open_request_id, updated_at) VALUES (?, ?, ?, ?, ?)",
+        roomID, sessionID, state.xuid, requestId, now,
       );
       this.ctx.storage.sql.exec(
         "INSERT INTO voice_room_members (xuid, room_id, joined_at) VALUES (?, ?, ?)",
@@ -578,8 +584,12 @@ export class Hub extends DurableObject<Env> {
       this.ctx.storage.sql.exec("UPDATE voice_rooms SET updated_at = ? WHERE room_id = ?", now, room.room_id);
     });
     const revoked = await this.flushVoiceRevocations(room.room_id);
+    if (!revoked) {
+      this.count("admission_refused");
+      send(ws, { type: "voice_error", request_id: message.request_id, code: "unavailable" });
+      return;
+    }
     send(ws, { type: "voice_members_updated", request_id: message.request_id, count: desired.length });
-    if (!revoked) this.count("admission_refused");
   }
 
   private async onVoiceHostClose(ws: WebSocket, state: Ready, requestId: string): Promise<void> {
@@ -635,14 +645,14 @@ export class Hub extends DurableObject<Env> {
 
   private voiceRoomForOwner(ownerXuid: string): VoiceRoomRow | undefined {
     return this.ctx.storage.sql.exec<VoiceRoomRow>(
-      "SELECT room_id, session_id, owner_xuid, updated_at FROM voice_rooms WHERE owner_xuid = ?",
+      "SELECT room_id, session_id, owner_xuid, open_request_id, updated_at FROM voice_rooms WHERE owner_xuid = ?",
       ownerXuid,
     ).toArray()[0];
   }
 
   private voiceRoomByID(roomID: string): VoiceRoomRow | undefined {
     return this.ctx.storage.sql.exec<VoiceRoomRow>(
-      "SELECT room_id, session_id, owner_xuid, updated_at FROM voice_rooms WHERE room_id = ?",
+      "SELECT room_id, session_id, owner_xuid, open_request_id, updated_at FROM voice_rooms WHERE room_id = ?",
       roomID,
     ).toArray()[0];
   }
