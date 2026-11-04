@@ -50,7 +50,7 @@ Required SFU claims must match `core/voice/admission.go`:
 
 | Claim | Value |
 | --- | --- |
-| `iss` | `https://api.cinnabar.gg` |
+| `iss` | `https://api.cinnabar.gg/voice` |
 | `aud` | `cinnabar-voice-sfu` |
 | `sub` | Authenticated XUID (the Go SFU verifier currently uses the XUID as subject) |
 | `xuid` | XUID from the authenticated socket and verified assertion |
