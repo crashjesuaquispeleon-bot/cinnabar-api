@@ -12,7 +12,7 @@ import { connect, hub, installFakeIssuer, login, type Client } from "./helpers";
 let rewardItem = { ...catalog.items[0]!, id: "fixture:login-reward", free: false };
 let release = { ...catalog, version: catalog.version + 1, items: [...catalog.items, rewardItem] };
 const clients: Client[] = [];
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 beforeEach(() => {
   rewardItem = { ...rewardItem, id: "fixture:login-" + crypto.randomUUID() };
   release = { ...catalog, version: catalog.version + 1, items: [...catalog.items, rewardItem] };
