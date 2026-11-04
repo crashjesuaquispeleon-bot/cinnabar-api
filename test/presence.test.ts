@@ -11,7 +11,7 @@ async function player(o: Parameters<typeof login>[0] = {}) {
   return session;
 }
 
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 afterEach(() => Promise.all(open.splice(0).map((c) => (c.close(), c.closed))));
 
 const ALEX = "2535400000000101";
