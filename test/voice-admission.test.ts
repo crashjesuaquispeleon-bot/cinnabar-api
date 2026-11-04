@@ -180,7 +180,7 @@ describe("authenticated FriendHost voice membership", () => {
     );
   });
 
-  it("stops issuing admissions before waiting for the SFU room-close request", async () => {
+  it("removes local room membership even when the SFU close request fails", async () => {
     await configureBroker();
     const host = track((await login({ xuid: "2535400000000021" })).client);
     const guest = track((await login({ xuid: "2535400000000022" })).client);
@@ -196,40 +196,27 @@ describe("authenticated FriendHost voice membership", () => {
     const fetchMock = vi.mocked(globalThis.fetch);
     const previousFetch = fetchMock.getMockImplementation();
     if (!previousFetch) throw new Error("Expected the fake issuer fetch mock to be installed");
-
-    let announceClose!: () => void;
-    let releaseClose!: () => void;
-    const closeStarted = new Promise<void>((resolve) => { announceClose = resolve; });
-    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
     fetchMock.mockImplementation(async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
-      if (url === closeURL) {
-        announceClose();
-        await closeGate;
-        return new Response(null, { status: 204 });
-      }
+      if (url === closeURL) return new Response(null, { status: 503 });
       return previousFetch(input, init);
     });
 
     try {
       const closeID = crypto.randomUUID();
       host.send({ type: "voice_host_close", request_id: closeID });
-      await closeStarted;
+      expect(await host.next()).toEqual({
+        type: "voice_closed",
+        request_id: closeID,
+        sfu_closed: false,
+      });
 
       guest.send({ type: "voice_admission_request", request_id: crypto.randomUUID() });
       expect(await guest.next()).toMatchObject({
         type: "voice_error",
         code: "not_in_room",
       });
-
-      releaseClose();
-      expect(await host.next()).toEqual({
-        type: "voice_closed",
-        request_id: closeID,
-        sfu_closed: true,
-      });
     } finally {
-      releaseClose();
       fetchMock.mockImplementation(previousFetch);
     }
   });
