@@ -6,12 +6,9 @@ Status: design and trust-boundary contract for the FriendHost-scoped broker in D
 
 The API's existing `/v1/connect` handshake authenticates a Minecraft multiplayer token and proves possession of its ES384 client key. That establishes an authenticated Cinnabar account/XUID; it does **not** establish membership in a particular live Bedrock partida.
 
-A voice admission must therefore require two independent proofs:
+Draft PR #1 implements a FriendHost-scoped broker. It trusts the official FriendHost process to report guest XUIDs only after its Xbox login and MPSD nonce checks, then verifies that each guest has a live authenticated Cinnabar API socket. This is a documented trust boundary, not a cryptographic proof against a modified host client.
 
-1. The existing authenticated API socket supplies the verified XUID.
-2. A trusted Cinnabar game-server adapter supplies a short-lived, server-signed membership assertion for the exact active partida.
-
-The broker must compare the assertion XUID with the already-authenticated socket XUID. A client-provided XUID, room name, server address, local `actor_session_id`, or `session_generation` is never authorization.
+For general multiplayer support or stronger resistance to a modified host, the broker needs a second independently verifiable proof: a short-lived assertion from a trusted server component, or direct broker-side verification of Xbox MPSD membership. Any assertion XUID must match the already-authenticated API socket XUID. A client-provided XUID, room name, server address, local `actor_session_id`, or `session_generation` is never sufficient authorization.
 
 ## Current FriendHost trust model and limitation
 
@@ -21,9 +18,11 @@ The guest roster is still reported by the host's Cinnabar process. The FriendHos
 
 Do not extend this roster mechanism to arbitrary servers by accepting a client-supplied XUID list. For stronger protection against a modified host client, the broker must independently verify MPSD membership or receive an assertion signed by a separately trusted server component. For third-party Bedrock servers, no equivalent trusted membership source is implemented yet; admission must remain unavailable.
 
-## Membership assertion
+## Future server membership assertion
 
-The game server signs a compact Ed25519 JWT with a server-only private key. The broker verifies it against an operator-configured public key allowlist. The assertion is a capability, not a reusable identity token.
+This section describes the additional contract required beyond the current FriendHost-scoped trust model; it is **not implemented by Draft PR #1**.
+
+A trusted game-server component would sign a compact Ed25519 JWT with a server-only private key. The broker would verify it against an operator-configured public key allowlist. The assertion is a capability, not a reusable identity token.
 
 Required claims:
 
@@ -45,7 +44,7 @@ The initial supported scope is **Cinnabar FriendHost only**. The official host p
 
 ## Broker-issued SFU admission
 
-After validating the assertion, matching its XUID to the authenticated API socket, checking its lifetime and atomically consuming its `jti`, the broker signs a separate Ed25519 JWT for the SFU.
+For the current FriendHost flow, the broker looks up membership stored in its Durable Object and derives the XUID, room and session from that state before signing a separate Ed25519 JWT for the SFU. A future general-server flow must additionally validate the signed assertion, match its XUID to the authenticated API socket, check its lifetime and atomically consume its `jti`.
 
 Required SFU claims must match `core/voice/admission.go`:
 
@@ -53,7 +52,7 @@ Required SFU claims must match `core/voice/admission.go`:
 | --- | --- |
 | `iss` | `https://api.cinnabar.gg` |
 | `aud` | `cinnabar-voice-sfu` |
-| `sub` | Authenticated Cinnabar account subject |
+| `sub` | Authenticated XUID (the Go SFU verifier currently uses the XUID as subject) |
 | `xuid` | XUID from the authenticated socket and verified assertion |
 | `room_id` | Broker-generated opaque room UUID bound to the host lifecycle |
 | `session_id` | Broker-generated opaque UUID for that exact host-world lifetime |
@@ -62,37 +61,36 @@ Required SFU claims must match `core/voice/admission.go`:
 
 The broker's Ed25519 private key is a Cloudflare Worker secret and is never returned to clients or committed. The corresponding public key is provisioned out-of-band to the SFU's `VerifyConfig`. Key rotation must be coordinated between broker and SFU; an unknown key must fail closed.
 
-The API returns the admission token only to the authenticated socket whose verified XUID matches the assertion. It must not publish tokens through presence, lookup, emote, loadout or public HTTP responses.
+The API returns the admission token only to the authenticated socket whose XUID matches the Durable Object's stored membership. A future assertion-based flow must also match the assertion XUID. Tokens must never be published through presence, lookup, emote, loadout or public HTTP responses.
 
 ## Lifecycle, renewal and revocation
 
-- The client renews before expiry using a fresh server assertion; renewal must preserve the same XUID, room and session.
-- A server-side member departure revokes that participant's current admission `jti`.
-- A partida end, host shutdown or server disconnect closes the exact `room_id` + `session_id` pair and revokes all participants.
-- The broker uses an authenticated server-to-server control channel for departure/session-close events. A client cannot invoke these controls.
+- The FriendHost process refreshes its complete roster on membership changes and periodically renews the 90-second host lease; each member requests a fresh 120-second SFU token through its authenticated API socket.
+- A guest removed from the stored roster loses future admission and the broker asks the SFU to revoke that participant's current admission `jti`.
+- Host shutdown or loss of the authenticated host account closes the exact `room_id` + `session_id` pair and asks the SFU to revoke all participants.
+- The API-to-SFU admin channel is authenticated server-to-server. The host's WebSocket operations are authenticated as the owner account, but the roster itself is not independently attested by the broker.
 - The SFU's existing broker-only individual-revocation and room/session-close endpoints are the enforcement point for immediate media teardown.
 - Expired leases are removed by the SFU even if a revocation event is lost. A client disconnect or local generation change also stops local capture and playback, but is not a substitute for server revocation.
 
 ## Required negative tests
 
-1. A forged or incorrectly signed assertion is rejected.
-2. Wrong issuer, audience, server ID, malformed UUID, expired assertion, future `nbf`, excessive lifetime and unknown key are rejected.
-3. Replaying an already consumed assertion `jti` is rejected atomically, including concurrent duplicate requests.
-4. Assertion XUID differing from the authenticated socket XUID is rejected.
-5. Client-selected room/session IDs without a valid server signature are rejected.
-6. Two members with the same verified room/session can receive admissions; different sessions cannot share a room.
-7. A renewal cannot change account, room or session and invalidates the old admission lease.
-8. Member departure revokes only that member; session close revokes all and only that exact session.
-9. Missing signing keys, missing server-adapter keys, unavailable replay storage, unavailable SFU control plane or invalid configuration all fail closed.
-10. No production token issuer or public voice feature is enabled by a test-only signing key.
+1. An unauthenticated host cannot open a room, change its roster or close another account's room.
+2. The API generates room/session UUIDs; clients cannot select them.
+3. A guest without a live authenticated Cinnabar API socket cannot be added or receive an admission.
+4. A guest not in the stored room roster cannot receive a token.
+5. Removing a guest prevents future tokens and revokes its current `jti`; a different member's admission remains active.
+6. A host close or host-account disconnect closes only that exact room/session and asks the SFU to revoke all its members.
+7. Expired host leases and admission tokens fail closed; failed SFU control calls never result in a new token being issued.
+8. Missing broker signing keys, admin URL or admin token keep admissions disabled.
+9. For a future assertion flow: forged signatures, wrong issuer/audience/server, replayed `jti`, mismatched XUID, malformed IDs and excessive lifetime must all be rejected.
+10. The FriendHost roster trust limitation must remain explicit; no general-server support is claimed without an independent membership proof.
 
 ## Deployment gate
 
 This design is not production-ready until all of the following exist and are tested together:
 
-- A server adapter that can prove membership for the supported server type.
-- Server signing-key provisioning and rotation.
-- Broker assertion verification, replay storage, admission signing and authenticated revocation controls.
+- The current FriendHost trust scope is reviewed and accepted for the first limited deployment, or replaced by independent MPSD verification.
+- For general server support: a server adapter that can prove membership, server signing-key provisioning/rotation, assertion verification and replay storage.
 - SFU public-key configuration and reachable TLS/WSS/ICE/TURN deployment.
 - Client renewal, departure and session-close integration.
 - End-to-end tests with two authenticated players in one partida and isolation tests across two partidas.
