@@ -411,6 +411,7 @@ export class Hub extends DurableObject<Env> {
         if (msg.type === "voice_host_close") return this.onVoiceHostClose(ws, attachment, msg.request_id);
         if (msg.type === "voice_admission_request") return this.onVoiceAdmissionRequest(ws, attachment, msg.request_id, now);
         if (msg.type === "voice_signal") return this.onVoiceSignal(ws, attachment, msg, now);
+        if (msg.type === "voice_peer_session_request") return this.onVoicePeerSessionRequest(ws, attachment, msg.request_id, now);
         return this.close(ws, Close.policyViolation, "already authenticated");
     }
   }
@@ -707,6 +708,33 @@ export class Hub extends DurableObject<Env> {
       return;
     }
     send(ws, { type: "voice_admission", request_id: requestId, token: admission.token, expires_at: admission.expiresAt });
+  }
+
+  /** Returns the server-derived session and deterministic offerer role for an exact two-member room. */
+  private onVoicePeerSessionRequest(ws: WebSocket, state: Ready, requestId: string, now: number): void {
+    const membership = this.voiceMembership(state.xuid);
+    const room = membership ? this.voiceRoomByID(membership.room_id) : undefined;
+    if (!membership || !room || now - room.updated_at > VOICE_HOST_LEASE_MS ||
+        !this.hasLiveAccount(state.xuid, now) || !this.hasLiveAccount(room.owner_xuid, now)) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "not_in_room" });
+      return;
+    }
+    const members = this.voiceMembers(room.room_id);
+    if (members.length !== 2 || !members.some((member) => member.xuid === state.xuid)) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "unavailable" });
+      return;
+    }
+    const peer = members.find((member) => member.xuid !== state.xuid);
+    if (!peer || !this.hasLiveAccount(peer.xuid, now)) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "member_unavailable" });
+      return;
+    }
+    send(ws, {
+      type: "voice_peer_session",
+      request_id: requestId,
+      session_id: room.session_id,
+      offerer: state.xuid === room.owner_xuid,
+    });
   }
 
   /**
