@@ -5,7 +5,7 @@ import { clientKey, connect, hello, hub, installFakeIssuer, login, mintToken, si
 
 const open: Client[] = [];
 const roster = Array.from({ length: 128 }, (_, i) => String(1000 + i));
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 beforeEach(async () => {
   await runInDurableObject(hub(), (_, state) => state.storage.deleteAll());
   await evictDurableObject(hub());
