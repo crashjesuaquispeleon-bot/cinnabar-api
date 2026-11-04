@@ -382,4 +382,32 @@ describe("authenticated FriendHost voice membership", () => {
     });
   });
 
+  it("opens and closes an authenticated P2P room without any SFU credentials", async () => {
+    for (const key of voiceEnvironmentKeys) {
+      if (!(key in savedEnvironment)) savedEnvironment[key] = env[key];
+      Object.assign(env, { [key]: undefined });
+    }
+    const host = track((await login({ xuid: "2535400000000301" })).client);
+    const guest = track((await login({ xuid: "2535400000000302" })).client);
+
+    const openID = crypto.randomUUID();
+    host.send({ type: "voice_host_open", request_id: openID });
+    const room = await host.next();
+    expect(room).toMatchObject({ type: "voice_room", request_id: openID });
+
+    const membersID = crypto.randomUUID();
+    host.send({ type: "voice_host_members", request_id: membersID, members: ["2535400000000302"] });
+    expect(await host.next()).toMatchObject({ type: "voice_members_updated", request_id: membersID, count: 2 });
+
+    const peerID = crypto.randomUUID();
+    guest.send({ type: "voice_peer_session_request", request_id: peerID });
+    expect(await guest.next()).toEqual({
+      type: "voice_peer_session", request_id: peerID, session_id: room.session_id, offerer: false,
+    });
+
+    const closeID = crypto.randomUUID();
+    host.send({ type: "voice_host_close", request_id: closeID });
+    expect(await host.next()).toEqual({ type: "voice_closed", request_id: closeID, sfu_closed: true });
+  });
+
 });
