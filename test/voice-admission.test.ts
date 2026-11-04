@@ -348,4 +348,38 @@ describe("authenticated FriendHost voice membership", () => {
     expect(decoded.kind).toBe("invalid");
   });
 
+  it("returns the current session and server-derived offerer role to exactly two members", async () => {
+    await configureBroker();
+    const host = track((await login({ xuid: "2535400000000201" })).client);
+    const guest = track((await login({ xuid: "2535400000000202" })).client);
+    const outsider = track((await login({ xuid: "2535400000000203" })).client);
+
+    const openID = crypto.randomUUID();
+    host.send({ type: "voice_host_open", request_id: openID });
+    const room = await host.next();
+    expect(room).toMatchObject({ type: "voice_room", request_id: openID });
+
+    const rosterID = crypto.randomUUID();
+    host.send({ type: "voice_host_members", request_id: rosterID, members: ["2535400000000202"] });
+    expect(await host.next()).toMatchObject({ type: "voice_members_updated", request_id: rosterID, count: 2 });
+
+    const hostRequest = crypto.randomUUID();
+    host.send({ type: "voice_peer_session_request", request_id: hostRequest });
+    expect(await host.next()).toEqual({
+      type: "voice_peer_session", request_id: hostRequest, session_id: room.session_id, offerer: true,
+    });
+
+    const guestRequest = crypto.randomUUID();
+    guest.send({ type: "voice_peer_session_request", request_id: guestRequest });
+    expect(await guest.next()).toEqual({
+      type: "voice_peer_session", request_id: guestRequest, session_id: room.session_id, offerer: false,
+    });
+
+    const outsiderRequest = crypto.randomUUID();
+    outsider.send({ type: "voice_peer_session_request", request_id: outsiderRequest });
+    expect(await outsider.next()).toEqual({
+      type: "voice_error", request_id: outsiderRequest, code: "not_in_room",
+    });
+  });
+
 });
