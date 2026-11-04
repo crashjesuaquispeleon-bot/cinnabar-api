@@ -10,7 +10,7 @@ vi.mock("../src/protocol", async (original) => ({
 }));
 
 const open: Client[] = [];
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 afterEach(() => Promise.all(open.splice(0).map((c) => (c.close(), c.closed))));
 
 /** Rebuilds the hub with a recording metrics binding and runs real server behavior. */
