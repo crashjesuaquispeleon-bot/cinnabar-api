@@ -6,7 +6,7 @@ import { MAX_CONNECTIONS_PER_XUID, SESSION_IDLE_TIMEOUT_MS } from "../src/protoc
 import { hub, installFakeIssuer, login, type Client } from "./helpers";
 
 const open: Client[] = [];
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 afterEach(() => Promise.all(open.splice(0).map((client) => (client.close(), client.closed))));
 
 /** Authenticates a tracked client without sending any automatic heartbeats. */
