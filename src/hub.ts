@@ -577,6 +577,34 @@ export class Hub extends DurableObject<Env> {
       return;
     }
 
+    // The SFU revocation request yields control. A concurrent close or lease
+    // expiry may have removed this room while it was in flight, so never
+    // recreate membership from a stale room snapshot.
+    const currentRoom = this.voiceRoomByID(room.room_id);
+    const refreshedAt = Date.now();
+    if (!currentRoom || currentRoom.session_id !== room.session_id ||
+        currentRoom.owner_xuid !== state.xuid) {
+      send(ws, { type: "voice_error", request_id: message.request_id, code: "room_not_open" });
+      return;
+    }
+    if (refreshedAt - currentRoom.updated_at > VOICE_HOST_LEASE_MS ||
+        !this.hasLiveAccount(currentRoom.owner_xuid, refreshedAt)) {
+      await this.closeVoiceRoom(currentRoom);
+      send(ws, { type: "voice_error", request_id: message.request_id, code: "host_lease_expired" });
+      return;
+    }
+    for (const xuid of message.members) {
+      if (!this.hasLiveAccount(xuid, refreshedAt)) {
+        send(ws, { type: "voice_error", request_id: message.request_id, code: "member_unavailable" });
+        return;
+      }
+      const current = this.voiceMembership(xuid);
+      if (current && current.room_id !== currentRoom.room_id) {
+        send(ws, { type: "voice_error", request_id: message.request_id, code: "already_in_room" });
+        return;
+      }
+    }
+
     const wanted = new Set(desired);
     const removed = this.voiceMembers(room.room_id).filter((member) => !wanted.has(member.xuid));
     this.ctx.storage.transactionSync(() => {
@@ -651,10 +679,30 @@ export class Hub extends DurableObject<Env> {
       send(ws, { type: "voice_error", request_id: requestId, code: "unavailable" });
       return;
     }
-    this.ctx.storage.sql.exec(
-      "INSERT INTO voice_admissions (token_id, room_id, xuid, expires_at, revoke_pending) VALUES (?, ?, ?, ?, 0)",
-      tokenID, room.room_id, state.xuid, admission.expiresAt * 1000,
-    );
+    // Signing is asynchronous. Re-check the authoritative membership and host
+    // lease in the same synchronous transaction that persists the lease, so a
+    // roster removal or room close during signing cannot leak a fresh JWT.
+    const persisted = this.ctx.storage.transactionSync(() => {
+      const currentMembership = this.voiceMembership(state.xuid);
+      const currentRoom = currentMembership
+        ? this.voiceRoomByID(currentMembership.room_id)
+        : undefined;
+      const commitNow = Date.now();
+      if (!currentMembership || currentMembership.room_id !== room.room_id || !currentRoom ||
+          currentRoom.session_id !== room.session_id || currentRoom.owner_xuid !== room.owner_xuid ||
+          commitNow - currentRoom.updated_at > VOICE_HOST_LEASE_MS ||
+          !this.hasLiveAccount(state.xuid, commitNow) ||
+          !this.hasLiveAccount(currentRoom.owner_xuid, commitNow)) return false;
+      this.ctx.storage.sql.exec(
+        "INSERT INTO voice_admissions (token_id, room_id, xuid, expires_at, revoke_pending) VALUES (?, ?, ?, ?, 0)",
+        tokenID, room.room_id, state.xuid, admission.expiresAt * 1000,
+      );
+      return true;
+    });
+    if (!persisted) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "not_in_room" });
+      return;
+    }
     send(ws, { type: "voice_admission", request_id: requestId, token: admission.token, expires_at: admission.expiresAt });
   }
 
@@ -716,18 +764,20 @@ export class Hub extends DurableObject<Env> {
     return true;
   }
 
-  /** Closes the exact SFU room/session, then drops broker membership even if the SFU is offline. */
+  /** Removes local admission first, then closes the exact SFU room/session. */
   private async closeVoiceRoom(room: VoiceRoomRow): Promise<boolean> {
-    const sfuClosed = await voiceSfuAdmin(
-      this.env,
-      `/v1/admin/rooms/${room.room_id}/sessions/${room.session_id}/close`,
-    );
+    // Do not leave an issuance window while the remote SFU admin request is in
+    // flight. If the SFU is offline, existing two-minute leases expire there;
+    // the broker must still stop issuing new leases immediately.
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec("DELETE FROM voice_room_members WHERE room_id = ?", room.room_id);
       this.ctx.storage.sql.exec("DELETE FROM voice_admissions WHERE room_id = ?", room.room_id);
       this.ctx.storage.sql.exec("DELETE FROM voice_rooms WHERE room_id = ?", room.room_id);
     });
-    return sfuClosed;
+    return voiceSfuAdmin(
+      this.env,
+      `/v1/admin/rooms/${room.room_id}/sessions/${room.session_id}/close`,
+    );
   }
 
   /** Disconnecting the last authenticated API socket removes a guest or closes its host room. */
