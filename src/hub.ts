@@ -7,6 +7,7 @@ import { PresenceHistory } from "./presence-history";
 import { LoginRewards, type LoginReward } from "./login-rewards";
 import { count } from "./metrics";
 import { IssuerUnavailable, encodeBase64Url, identityUuid, issuerKeys, verifyProof } from "./identity";
+import { issueVoiceAdmissionToken, voiceBrokerConfigured, voiceSfuAdmin } from "./voice-admission";
 import {
   Close,
   SERVER_PARAMETERS,
@@ -33,6 +34,7 @@ import {
   type ServerMessage,
   type EmoteState,
   type LoadoutState,
+  type VoiceHostMembers,
   EMOTE_TTL_MS,
 } from "./protocol";
 
@@ -75,6 +77,12 @@ type Ready = Extract<Attachment, { stage: "ready" }>;
 const CLOSED = { stage: "closed" } as const;
 
 const releaseKey = (channel: Channel) => `release:${channel}`;
+const VOICE_HOST_LEASE_MS = 90_000;
+const VOICE_ADMISSION_TTL_SECONDS = 120;
+
+interface VoiceRoomRow { room_id: string; session_id: string; owner_xuid: string; updated_at: number }
+interface VoiceMemberRow { room_id: string; xuid: string }
+interface VoiceAdmissionRow { token_id: string; expires_at: number }
 
 /**
  * Owns every WebSocket and the release records. Socket tags are fixed at accept time, before the client has
@@ -116,6 +124,19 @@ export class Hub extends DurableObject<Env> {
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS cosmetic_entitlements (xuid TEXT NOT NULL, item_id TEXT NOT NULL, PRIMARY KEY (xuid, item_id))");
     this.loginRewards = new LoginRewards(ctx.storage);
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS hub_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS voice_rooms (
+      room_id TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE,
+      owner_xuid TEXT NOT NULL UNIQUE, updated_at INTEGER NOT NULL
+    )`);
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS voice_room_members (
+      xuid TEXT PRIMARY KEY, room_id TEXT NOT NULL, joined_at INTEGER NOT NULL
+    )`);
+    ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS voice_room_members_room ON voice_room_members (room_id)");
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS voice_admissions (
+      token_id TEXT PRIMARY KEY, room_id TEXT NOT NULL, xuid TEXT NOT NULL,
+      expires_at INTEGER NOT NULL, revoke_pending INTEGER NOT NULL DEFAULT 0
+    )`);
+    ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS voice_admissions_room_member ON voice_admissions (room_id, xuid)");
     ctx.storage.sql.exec("INSERT OR IGNORE INTO hub_config (key, value) VALUES ('ip_salt', ?)", crypto.randomUUID());
     this.ipSalt = ctx.storage.sql.exec<{ value: string }>("SELECT value FROM hub_config WHERE key = 'ip_salt'").one().value;
     this.uniqueUsers = new UniqueUsers(ctx.storage.sql, this.ipSalt);
@@ -368,6 +389,10 @@ export class Hub extends DurableObject<Env> {
         if (msg.type === "lookup") return this.onLookup(ws, attachment, msg, now);
         if (msg.type === "loadout") return this.onLoadout(ws, attachment, msg);
         if (msg.type === "emote_state") return this.onEmoteState(ws, attachment, msg, now);
+        if (msg.type === "voice_host_open") return this.onVoiceHostOpen(ws, attachment, msg.request_id, now);
+        if (msg.type === "voice_host_members") return this.onVoiceHostMembers(ws, attachment, msg, now);
+        if (msg.type === "voice_host_close") return this.onVoiceHostClose(ws, attachment, msg.request_id);
+        if (msg.type === "voice_admission_request") return this.onVoiceAdmissionRequest(ws, attachment, msg.request_id, now);
         return this.close(ws, Close.policyViolation, "already authenticated");
     }
   }
@@ -458,6 +483,248 @@ export class Hub extends DurableObject<Env> {
     if (latest && compareReleases(latest.version, latest.build, pending.clientVersion, pending.clientBuild) > 0) {
       send(ws, { type: "release", ...latest });
     }
+  }
+
+  /** Opens a broker-generated room for one authenticated FriendHost owner. */
+  private async onVoiceHostOpen(ws: WebSocket, state: Ready, requestId: string, now: number): Promise<void> {
+    if (!voiceBrokerConfigured(this.env)) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "unavailable" });
+      return;
+    }
+    const existing = this.voiceRoomForOwner(state.xuid);
+    if (existing) {
+      if (now - existing.updated_at <= VOICE_HOST_LEASE_MS && this.hasLiveAccount(state.xuid, now)) {
+        send(ws, { type: "voice_room", request_id: requestId, room_id: existing.room_id, session_id: existing.session_id });
+        return;
+      }
+      await this.closeVoiceRoom(existing);
+    }
+    const membership = this.voiceMembership(state.xuid);
+    if (membership) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "already_in_room" });
+      return;
+    }
+    const roomID = crypto.randomUUID();
+    const sessionID = crypto.randomUUID();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO voice_rooms (room_id, session_id, owner_xuid, updated_at) VALUES (?, ?, ?, ?)",
+        roomID, sessionID, state.xuid, now,
+      );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO voice_room_members (xuid, room_id, joined_at) VALUES (?, ?, ?)",
+        state.xuid, roomID, now,
+      );
+    });
+    send(ws, { type: "voice_room", request_id: requestId, room_id: roomID, session_id: sessionID });
+  }
+
+  /** Replaces the complete FriendHost roster and renews its short host lease. */
+  private async onVoiceHostMembers(ws: WebSocket, state: Ready, message: VoiceHostMembers, now: number): Promise<void> {
+    const room = this.voiceRoomForOwner(state.xuid);
+    if (!room) {
+      send(ws, { type: "voice_error", request_id: message.request_id, code: "room_not_open" });
+      return;
+    }
+    if (now - room.updated_at > VOICE_HOST_LEASE_MS || !this.hasLiveAccount(room.owner_xuid, now)) {
+      await this.closeVoiceRoom(room);
+      send(ws, { type: "voice_error", request_id: message.request_id, code: "host_lease_expired" });
+      return;
+    }
+    if (message.members.length > 63 || message.members.includes(state.xuid) ||
+        new Set(message.members).size !== message.members.length) {
+      send(ws, { type: "voice_error", request_id: message.request_id, code: "invalid_members" });
+      return;
+    }
+    const desired = [state.xuid, ...message.members];
+    for (const xuid of message.members) {
+      if (!this.hasLiveAccount(xuid, now)) {
+        send(ws, { type: "voice_error", request_id: message.request_id, code: "member_unavailable" });
+        return;
+      }
+      const current = this.voiceMembership(xuid);
+      if (current && current.room_id !== room.room_id) {
+        send(ws, { type: "voice_error", request_id: message.request_id, code: "already_in_room" });
+        return;
+      }
+    }
+
+    // Clear old removal leases before reusing a membership slot. If the SFU admin
+    // endpoint is unavailable, leave the current roster unchanged and fail closed.
+    if (!(await this.flushVoiceRevocations(room.room_id))) {
+      send(ws, { type: "voice_error", request_id: message.request_id, code: "unavailable" });
+      return;
+    }
+
+    const wanted = new Set(desired);
+    const removed = this.voiceMembers(room.room_id).filter((member) => !wanted.has(member.xuid));
+    this.ctx.storage.transactionSync(() => {
+      for (const member of removed) {
+        this.ctx.storage.sql.exec(
+          "DELETE FROM voice_room_members WHERE room_id = ? AND xuid = ?",
+          room.room_id, member.xuid,
+        );
+        this.ctx.storage.sql.exec(
+          "UPDATE voice_admissions SET revoke_pending = 1 WHERE room_id = ? AND xuid = ?",
+          room.room_id, member.xuid,
+        );
+      }
+      for (const xuid of desired) {
+        this.ctx.storage.sql.exec(
+          "INSERT OR IGNORE INTO voice_room_members (xuid, room_id, joined_at) VALUES (?, ?, ?)",
+          xuid, room.room_id, now,
+        );
+      }
+      this.ctx.storage.sql.exec("UPDATE voice_rooms SET updated_at = ? WHERE room_id = ?", now, room.room_id);
+    });
+    const revoked = await this.flushVoiceRevocations(room.room_id);
+    send(ws, { type: "voice_members_updated", request_id: message.request_id, count: desired.length });
+    if (!revoked) this.count("admission_refused");
+  }
+
+  private async onVoiceHostClose(ws: WebSocket, state: Ready, requestId: string): Promise<void> {
+    const room = this.voiceRoomForOwner(state.xuid);
+    const sfuClosed = room ? await this.closeVoiceRoom(room) : true;
+    send(ws, { type: "voice_closed", request_id: requestId, sfu_closed: sfuClosed });
+  }
+
+  /** Mints a two-minute token only for this authenticated XUID's stored room membership. */
+  private async onVoiceAdmissionRequest(ws: WebSocket, state: Ready, requestId: string, now: number): Promise<void> {
+    if (!voiceBrokerConfigured(this.env)) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "unavailable" });
+      return;
+    }
+    const membership = this.voiceMembership(state.xuid);
+    if (!membership || !this.hasLiveAccount(state.xuid, now)) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "not_in_room" });
+      return;
+    }
+    const room = this.voiceRoomByID(membership.room_id);
+    if (!room) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "not_in_room" });
+      return;
+    }
+    if (now - room.updated_at > VOICE_HOST_LEASE_MS || !this.hasLiveAccount(room.owner_xuid, now)) {
+      await this.closeVoiceRoom(room);
+      send(ws, { type: "voice_error", request_id: requestId, code: "host_lease_expired" });
+      return;
+    }
+    if (!(await this.flushVoiceRevocations(room.room_id))) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "unavailable" });
+      return;
+    }
+    const tokenID = crypto.randomUUID();
+    const admission = await issueVoiceAdmissionToken(this.env, {
+      xuid: state.xuid,
+      roomID: room.room_id,
+      sessionID: room.session_id,
+      tokenID,
+      now,
+      ttlSeconds: VOICE_ADMISSION_TTL_SECONDS,
+    });
+    if (!admission) {
+      send(ws, { type: "voice_error", request_id: requestId, code: "unavailable" });
+      return;
+    }
+    this.ctx.storage.sql.exec(
+      "INSERT INTO voice_admissions (token_id, room_id, xuid, expires_at, revoke_pending) VALUES (?, ?, ?, ?, 0)",
+      tokenID, room.room_id, state.xuid, admission.expiresAt * 1000,
+    );
+    send(ws, { type: "voice_admission", request_id: requestId, token: admission.token, expires_at: admission.expiresAt });
+  }
+
+  private voiceRoomForOwner(ownerXuid: string): VoiceRoomRow | undefined {
+    return this.ctx.storage.sql.exec<VoiceRoomRow>(
+      "SELECT room_id, session_id, owner_xuid, updated_at FROM voice_rooms WHERE owner_xuid = ?",
+      ownerXuid,
+    ).toArray()[0];
+  }
+
+  private voiceRoomByID(roomID: string): VoiceRoomRow | undefined {
+    return this.ctx.storage.sql.exec<VoiceRoomRow>(
+      "SELECT room_id, session_id, owner_xuid, updated_at FROM voice_rooms WHERE room_id = ?",
+      roomID,
+    ).toArray()[0];
+  }
+
+  private voiceMembership(xuid: string): VoiceMemberRow | undefined {
+    return this.ctx.storage.sql.exec<VoiceMemberRow>(
+      "SELECT room_id, xuid FROM voice_room_members WHERE xuid = ?",
+      xuid,
+    ).toArray()[0];
+  }
+
+  private voiceMembers(roomID: string): VoiceMemberRow[] {
+    return this.ctx.storage.sql.exec<VoiceMemberRow>(
+      "SELECT room_id, xuid FROM voice_room_members WHERE room_id = ? ORDER BY xuid",
+      roomID,
+    ).toArray();
+  }
+
+  private hasLiveAccount(xuid: string, now: number): boolean {
+    for (const socket of this.byXuid.get(xuid) ?? []) {
+      const session = this.sessions.get(socket);
+      if (socket.readyState === WebSocket.OPEN && session?.stage === "ready" &&
+          this.idleDeadline(socket, session) > now) return true;
+    }
+    return false;
+  }
+
+  /** Retries pending revocations before a participant can receive another lease. */
+  private async flushVoiceRevocations(roomID: string): Promise<boolean> {
+    const pending = this.ctx.storage.sql.exec<VoiceAdmissionRow>(
+      "SELECT token_id, expires_at FROM voice_admissions WHERE room_id = ? AND revoke_pending = 1",
+      roomID,
+    ).toArray();
+    for (const lease of pending) {
+      if (lease.expires_at <= Date.now()) {
+        this.ctx.storage.sql.exec("DELETE FROM voice_admissions WHERE token_id = ?", lease.token_id);
+        continue;
+      }
+      if (!(await voiceSfuAdmin(
+        this.env,
+        `/v1/admin/rooms/${roomID}/admissions/${lease.token_id}/revoke`,
+      ))) return false;
+      this.ctx.storage.sql.exec("DELETE FROM voice_admissions WHERE token_id = ?", lease.token_id);
+    }
+    this.ctx.storage.sql.exec("DELETE FROM voice_admissions WHERE room_id = ? AND expires_at <= ?", roomID, Date.now());
+    return true;
+  }
+
+  /** Closes the exact SFU room/session, then drops broker membership even if the SFU is offline. */
+  private async closeVoiceRoom(room: VoiceRoomRow): Promise<boolean> {
+    const sfuClosed = await voiceSfuAdmin(
+      this.env,
+      `/v1/admin/rooms/${room.room_id}/sessions/${room.session_id}/close`,
+    );
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("DELETE FROM voice_room_members WHERE room_id = ?", room.room_id);
+      this.ctx.storage.sql.exec("DELETE FROM voice_admissions WHERE room_id = ?", room.room_id);
+      this.ctx.storage.sql.exec("DELETE FROM voice_rooms WHERE room_id = ?", room.room_id);
+    });
+    return sfuClosed;
+  }
+
+  /** Disconnecting the last authenticated API socket removes a guest or closes its host room. */
+  private async onVoiceAccountOffline(xuid: string): Promise<void> {
+    const hosted = this.voiceRoomForOwner(xuid);
+    if (hosted) {
+      await this.closeVoiceRoom(hosted);
+      return;
+    }
+    const membership = this.voiceMembership(xuid);
+    if (!membership) return;
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        "DELETE FROM voice_room_members WHERE xuid = ? AND room_id = ?",
+        xuid, membership.room_id,
+      );
+      this.ctx.storage.sql.exec(
+        "UPDATE voice_admissions SET revoke_pending = 1 WHERE room_id = ? AND xuid = ?",
+        membership.room_id, xuid,
+      );
+    });
+    await this.flushVoiceRevocations(membership.room_id);
   }
 
   /** Changes this socket's visibility and immediately clears any retained presence on opt-out. */
@@ -849,7 +1116,10 @@ export class Hub extends DurableObject<Env> {
       unindex(this.byXuid, attachment.xuid, ws);
       unindex(this.byUuid, attachment.uuid, ws);
       unindex(this.byChannel, attachment.channel, ws);
-      if (!this.byXuid.has(attachment.xuid)) this.entitlements.delete(attachment.xuid);
+      if (!this.byXuid.has(attachment.xuid)) {
+        this.entitlements.delete(attachment.xuid);
+        this.ctx.waitUntil(this.onVoiceAccountOffline(attachment.xuid).catch(() => undefined));
+      }
       if (attachment.visible || (!this.byXuid.has(attachment.xuid) && this.linger.has(attachment.xuid))) {
         const deadline = Date.now() + PRESENCE_LINGER_MS;
         this.linger.set(attachment.xuid, deadline);

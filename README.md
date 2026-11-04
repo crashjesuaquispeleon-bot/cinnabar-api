@@ -21,7 +21,7 @@ messages against it.
 | `GET /v1/mod/assets/:sha256` | Anonymous immutable WASM download, available only after metadata publication. Never exposes the private source repository or an upload credential. |
 | `GET /v1/mod/download` | Anonymous first-install download of the newest published stable mod for the configured package and host repository. No hash or installed version required. Streams the verified WASM with its download filename; returns 404 if unavailable. Responses are not cached. Older hosts should use the compatibility-aware update route. |
 | `GET /v1/mod/update` | Requires full `host_revision` and comma-separated supported `api_revisions`, installed `current_version` and full `current_revision`; the official package and host repository are fixed server-side. Returns 200 with the newest newer compatible stable release or 204 with no body. Invalid or missing identities return 400. Responses are not cached. |
-| `GET /v1/connect` | WebSocket. The client authenticates with a Minecraft multiplayer token plus an ES384 proof of its key, then can toggle visibility, look up which XUIDs or UUIDs recently used Cinnabar, and receives release pushes. |
+| `GET /v1/connect` | WebSocket. The client authenticates with a Minecraft multiplayer token plus an ES384 proof of its key, then can toggle visibility, look up identifiers, receive release pushes, and use the authenticated FriendHost voice-admission messages described below. |
 
 Public GET responses use the Cloudflare Cache API with lifetimes declared beside each route:
 
@@ -366,3 +366,26 @@ Unavailable download totals include a bounded `code`: `source_rate_limited` for
 GitHub 403/429, `source_unavailable` for other upstream HTTP failures, or
 `count_unavailable` for other failures. Upstream HTTP failures also include
 `source_status`. Responses never include upstream bodies or raw error details.
+
+
+## Voice admission broker (FriendHost scope)
+
+The authenticated WebSocket supports a host-owned voice-room flow:
+
+1. An authenticated FriendHost owner sends `voice_host_open`. The Hub creates opaque room and session UUIDs; request fields cannot select either one.
+2. The host sends `voice_host_members` with the full guest XUID roster. The Hub derives the host XUID from the authenticated socket, adds that owner itself, requires every guest to have a live authenticated Cinnabar API session, and enforces one room per account. The host must repeat this full-roster message at least every 30 seconds; a 90-second host lease closes stale rooms.
+3. A room member sends `voice_admission_request` without an XUID, room ID or session ID. The Hub resolves the authenticated socket's XUID and stored membership and signs a two-minute EdDSA JWT with the broker-only Ed25519 private key.
+4. Removed members' issued JTIs are immediately revoked through the SFU admin endpoint. If the SFU admin endpoint is unavailable, the removed member cannot renew, and the SFU's two-minute lease expiry is the fail-safe. Room closure asks the SFU to close the exact room/session pair.
+
+Client messages: `voice_host_open`, `voice_host_members`, `voice_host_close`, and `voice_admission_request`. Replies: `voice_room`, `voice_members_updated`, `voice_closed`, `voice_admission`, and `voice_error`. The JWT contains `iss`, `aud`, `sub`, `xuid`, `room_id`, `session_id`, `jti`, `iat`, `nbf`, and `exp`.
+
+Configure these Worker secrets only after deploying the matching SFU and pinning its public key:
+
+- `VOICE_ADMISSION_PRIVATE_KEY`: Ed25519 private key in PKCS#8 PEM format. Keep it only in the broker secret store.
+- `VOICE_SFU_ADMIN_URL`: HTTPS origin of the SFU admin listener, with no path or query string.
+- `VOICE_SFU_ADMIN_TOKEN`: exactly 32 printable ASCII characters. On the SFU, set `CINNABAR_VOICE_CONTROL_TOKEN` to the base64 encoding of those same 32 bytes.
+- Optional `VOICE_ADMISSION_ISSUER` and `VOICE_ADMISSION_AUDIENCE` override `https://api.cinnabar.gg/voice` and `cinnabar-voice-sfu`; they must exactly match the SFU verifier configuration.
+
+The Worker fails closed when the signing key or HTTPS admin credentials are missing. Pull-request CI must use ephemeral test keys; no production signing or admin secrets should be exposed to CI.
+
+**Trust boundary:** this message flow is scoped to Cinnabar FriendHost. The local FriendHost process is expected to report the roster only after its Xbox-authenticated Minecraft login and per-member MPSD nonce checks. The broker independently verifies each reported guest's current Cinnabar account authentication, but it cannot remotely attest the host process or prove membership on arbitrary third-party Bedrock servers. A modified or malicious host client can lie about its FriendHost roster. Use this only with a trusted host implementation; general multiplayer voice still requires a server-side plugin/adapter or other independently verifiable membership attestation. Never accept client-selected addresses, server names, room IDs, session IDs, or XUID claims as proof.
