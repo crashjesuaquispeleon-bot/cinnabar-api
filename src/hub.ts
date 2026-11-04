@@ -858,6 +858,9 @@ export class Hub extends DurableObject<Env> {
       this.ctx.storage.sql.exec("DELETE FROM voice_admissions WHERE room_id = ?", room.room_id);
       this.ctx.storage.sql.exec("DELETE FROM voice_rooms WHERE room_id = ?", room.room_id);
     });
+    // P2P rooms have no remote media server to close. Removing broker membership
+    // immediately revokes further signaling; an active peer is closed by its lease check.
+    if (!voiceBrokerConfigured(this.env)) return true;
     return voiceSfuAdmin(
       this.env,
       `/v1/admin/rooms/${room.room_id}/sessions/${room.session_id}/close`,
