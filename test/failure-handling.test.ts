@@ -5,7 +5,7 @@ import { Hub } from "../src/hub";
 import { connect, hub, installFakeIssuer, login, type Client } from "./helpers";
 
 const open: Client[] = [];
-beforeAll(installFakeIssuer);
+beforeAll(() => installFakeIssuer());
 afterEach(() => Promise.all(open.splice(0).map((client) => (client.close(), client.closed))));
 
 describe("session failures", () => {
