@@ -389,3 +389,16 @@ Configure these Worker secrets only after deploying the matching SFU and pinning
 The Worker fails closed when the signing key or HTTPS admin credentials are missing. Pull-request CI must use ephemeral test keys; no production signing or admin secrets should be exposed to CI.
 
 **Trust boundary:** this message flow is scoped to Cinnabar FriendHost. The local FriendHost process is expected to report the roster only after its Xbox-authenticated Minecraft login and per-member MPSD nonce checks. The broker independently verifies each reported guest's current Cinnabar account authentication, but it cannot remotely attest the host process or prove membership on arbitrary third-party Bedrock servers. A modified or malicious host client can lie about its FriendHost roster. Use this only with a trusted host implementation; general multiplayer voice still requires a server-side plugin/adapter or other independently verifiable membership attestation. Never accept client-selected addresses, server names, room IDs, session IDs, or XUID claims as proof.
+
+## GitHub Actions validation
+
+The `CI` workflow runs on pull requests and validates the API with
+`pnpm install --frozen-lockfile`, `pnpm typecheck`, and `pnpm test`.
+The production deploy job is limited to successful pushes to `main`; it is
+not run for pull requests. Pull-request CI must use ephemeral test credentials
+and must never require production signing, SFU-admin, or Cloudflare secrets.
+
+Enabling or re-enabling a workflow does not replay earlier pull-request events.
+After enabling it, a new commit on the pull-request branch creates a fresh
+`pull_request`/`synchronize` event and should start the validation workflow.
+
