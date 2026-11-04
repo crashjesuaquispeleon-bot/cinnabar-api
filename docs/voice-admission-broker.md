@@ -13,6 +13,12 @@ A voice admission must therefore require two independent proofs:
 
 The broker must compare the assertion XUID with the already-authenticated socket XUID. A client-provided XUID, room name, server address, local `actor_session_id`, or `session_generation` is never authorization.
 
+## Existing native-client requests are not membership proof
+
+The current Go client already defines the intended host operations (`voice_host_open`, `voice_host_members`, `voice_host_close`) and the participant operation (`voice_admission_request`). These are transport requests only. In particular, the `members` array sent by the host process is **client-originated data** and must not be copied into an authoritative roster or used to mint admissions merely because the WebSocket is authenticated.
+
+The API must obtain or verify the roster through a trusted server-side source before it accepts any member. A host's local MPSD lookup and nonce check are useful client-side admission checks, but the API cannot independently rely on them unless the Xbox/MPSD membership is verified by the broker or accompanied by an assertion signed by a separately trusted server component. Do not let the owner account add arbitrary XUIDs to the voice room.
+
 ## Membership assertion
 
 The game server signs a compact Ed25519 JWT with a server-only private key. The broker verifies it against an operator-configured public key allowlist. The assertion is a capability, not a reusable identity token.
