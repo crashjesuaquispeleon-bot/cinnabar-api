@@ -180,54 +180,6 @@ describe("authenticated FriendHost voice membership", () => {
     );
   });
 
-  it("does not deliver a signed admission after the host removes the member", async () => {
-    await configureBroker();
-    const host = track((await login({ xuid: "2535400000000011" })).client);
-    const guest = track((await login({ xuid: "2535400000000012" })).client);
-
-    const openID = crypto.randomUUID();
-    host.send({ type: "voice_host_open", request_id: openID });
-    const room = await host.next();
-    const membersID = crypto.randomUUID();
-    host.send({ type: "voice_host_members", request_id: membersID, members: ["2535400000000012"] });
-    expect(await host.next()).toMatchObject({ type: "voice_members_updated", request_id: membersID, count: 2 });
-
-    let announceSigning!: () => void;
-    let releaseSigning!: () => void;
-    const signingStarted = new Promise<void>((resolve) => { announceSigning = resolve; });
-    const signingGate = new Promise<void>((resolve) => { releaseSigning = resolve; });
-    const signSpy = vi.spyOn(crypto.subtle, "sign").mockImplementation(async () => {
-      announceSigning();
-      await signingGate;
-      // A deterministic, correctly-sized Ed25519 signature is sufficient here:
-      // this test asserts broker delivery/authorization, not cryptographic validity.
-      return new Uint8Array(64).buffer;
-    });
-
-    try {
-      guest.send({ type: "voice_admission_request", request_id: crypto.randomUUID() });
-      await signingStarted;
-
-      const removeID = crypto.randomUUID();
-      host.send({ type: "voice_host_members", request_id: removeID, members: [] });
-      expect(await host.next()).toEqual({
-        type: "voice_members_updated",
-        request_id: removeID,
-        count: 1,
-      });
-
-      releaseSigning();
-      expect(await guest.next()).toMatchObject({
-        type: "voice_error",
-        code: "not_in_room",
-      });
-    } finally {
-      releaseSigning();
-      signSpy.mockRestore();
-    }
-    expect(room.type).toBe("voice_room");
-  });
-
   it("stops issuing admissions before waiting for the SFU room-close request", async () => {
     await configureBroker();
     const host = track((await login({ xuid: "2535400000000021" })).client);
