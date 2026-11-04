@@ -172,6 +172,9 @@
         },
         {
           "$ref": "#/$defs/VoiceSignal"
+        },
+        {
+          "$ref": "#/$defs/VoicePeerSessionRequest"
         }
       ]
     },
@@ -324,6 +327,9 @@
         },
         {
           "$ref": "#/$defs/VoicePeerSignal"
+        },
+        {
+          "$ref": "#/$defs/VoicePeerSession"
         }
       ]
     },
@@ -1632,6 +1638,44 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 8192
+        }
+      }
+    },
+    "VoicePeerSessionRequest": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_peer_session_request"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        }
+      }
+    },
+    "VoicePeerSession": {
+      "type": "object",
+      "required": [
+        "type",
+        "request_id",
+        "session_id",
+        "offerer"
+      ],
+      "properties": {
+        "type": {
+          "const": "voice_peer_session"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "offerer": {
+          "type": "boolean"
         }
       }
     }
